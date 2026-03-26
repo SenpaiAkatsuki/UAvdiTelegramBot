@@ -1,0 +1,1477 @@
+﻿from __future__ import annotations
+
+import json
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from typing import Any, Mapping
+from uuid import uuid4
+
+import asyncpg
+from asyncpg import Connection, Pool, Record
+
+"""
+PostgreSQL repository.
+
+Central async data-access layer for users, applications, payments, voting, and subscriptions.
+"""
+
+
+def _record_to_dict(row: Record | None) -> dict[str, Any] | None:
+    # Convert asyncpg record to plain dict.
+    if row is None:
+        return None
+    return dict(row)
+
+
+def _utcnow() -> datetime:
+    # Current UTC timestamp helper.
+    return datetime.now(timezone.utc)
+
+
+SUBSCRIPTION_PRICE_MINOR_SETTING_KEY = "subscription_price_minor"
+
+
+def _to_jsonb(value: Mapping[str, Any] | None = None) -> str:
+    # Serialize mapping to JSON string for jsonb columns.
+    return json.dumps(dict(value or {}), ensure_ascii=False, default=str)
+
+
+@dataclass
+class PostgresRepo:
+    pool: Pool
+
+    async def _acquire_conn(self, conn: Connection | None = None) -> Connection:
+        # Reuse external connection or acquire one from pool.
+        if conn is not None:
+            return conn
+        return await self.pool.acquire()
+
+    async def _release_conn(self, conn: Connection, external: Connection | None) -> None:
+        # Release only internally acquired connections.
+        if external is None:
+            await self.pool.release(conn)
+
+    @staticmethod
+    def _clean_string(value: Any) -> str | None:
+        # Normalize incoming values to stripped string or None.
+        if value is None:
+            return None
+        if isinstance(value, str):
+            value = value.strip()
+            return value or None
+        return str(value).strip() or None
+
+    @staticmethod
+    def compute_days_left(subscription_expires_at: datetime | None) -> int | None:
+        # Compute whole-day difference from today (UTC).
+        if not isinstance(subscription_expires_at, datetime):
+            return None
+
+        expires_at = subscription_expires_at
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        else:
+            expires_at = expires_at.astimezone(timezone.utc)
+
+        today = _utcnow().date()
+        return (expires_at.date() - today).days
+
+    async def get_setting(
+        self,
+        key: str,
+        conn: Connection | None = None,
+    ) -> str | None:
+        acquired = await self._acquire_conn(conn)
+        try:
+            value = await acquired.fetchval(
+                "SELECT value_text FROM app_settings WHERE key = $1;",
+                key,
+            )
+            if value is None:
+                return None
+            return str(value)
+        finally:
+            await self._release_conn(acquired, conn)
+
+    async def set_setting(
+        self,
+        key: str,
+        value_text: str,
+        updated_by_tg_user_id: int | None = None,
+        conn: Connection | None = None,
+    ) -> None:
+        acquired = await self._acquire_conn(conn)
+        try:
+            await acquired.execute(
+                """
+                INSERT INTO app_settings (key, value_text, updated_by_tg_user_id, updated_at)
+                VALUES ($1, $2, $3, NOW())
+                ON CONFLICT (key) DO UPDATE
+                SET
+                    value_text = EXCLUDED.value_text,
+                    updated_by_tg_user_id = EXCLUDED.updated_by_tg_user_id,
+                    updated_at = NOW();
+                """,
+                key,
+                value_text,
+                updated_by_tg_user_id,
+            )
+        finally:
+            await self._release_conn(acquired, conn)
+
+    async def get_subscription_price_minor(self, default_minor: int) -> int:
+        value_text = await self.get_setting(SUBSCRIPTION_PRICE_MINOR_SETTING_KEY)
+        if value_text is None:
+            return max(int(default_minor), 1)
+        try:
+            parsed = int(value_text)
+        except ValueError:
+            return max(int(default_minor), 1)
+        return max(parsed, 1)
+
+    async def set_subscription_price_minor(
+        self,
+        amount_minor: int,
+        updated_by_tg_user_id: int | None = None,
+    ) -> int:
+        normalized = max(int(amount_minor), 1)
+        await self.set_setting(
+            key=SUBSCRIPTION_PRICE_MINOR_SETTING_KEY,
+            value_text=str(normalized),
+            updated_by_tg_user_id=updated_by_tg_user_id,
+        )
+        return normalized
+
+    @staticmethod
+    def _extract_weblium_fields(payload_json: Mapping[str, Any]) -> dict[str, Any]:
+        fields_raw = payload_json.get("fields")
+        fields = fields_raw if isinstance(fields_raw, Mapping) else {}
+
+        applicant_name = (
+            PostgresRepo._clean_string(payload_json.get("applicant_name"))
+            or PostgresRepo._clean_string(payload_json.get("name"))
+        )
+        contact_phone = (
+            PostgresRepo._clean_string(payload_json.get("contact_phone"))
+            or PostgresRepo._clean_string(payload_json.get("phone"))
+        )
+        contact_email = (
+            PostgresRepo._clean_string(payload_json.get("contact_email"))
+            or PostgresRepo._clean_string(payload_json.get("email"))
+        )
+        specialization = PostgresRepo._clean_string(payload_json.get("specialization"))
+        document_url = PostgresRepo._clean_string(payload_json.get("document_url"))
+        document_file_name = PostgresRepo._clean_string(
+            payload_json.get("document_file_name")
+        )
+
+        fallback_text_values: list[str] = []
+
+        for key, item in fields.items():
+            key_l = str(key).lower()
+            if not isinstance(item, Mapping):
+                continue
+
+            field_type = PostgresRepo._clean_string(item.get("type"))
+            field_type_l = field_type.lower() if field_type else ""
+            title = PostgresRepo._clean_string(item.get("title"))
+            title_l = title.lower() if title else ""
+            field_value = item.get("value")
+            field_text = PostgresRepo._clean_string(field_value)
+
+            if key_l in {"short_text", "full_name"} or "name" in key_l:
+                applicant_name = applicant_name or field_text
+            elif key_l in {"contactform_phonenumber", "phone", "phone_number"} or field_type_l == "phone":
+                contact_phone = contact_phone or field_text
+            elif key_l in {"contactform_email", "email"} or field_type_l == "email":
+                contact_email = contact_email or field_text
+            elif (
+                "specialization" in key_l
+                or "specialization" in title_l
+                or "special" in title_l
+            ):
+                specialization = specialization or field_text
+            elif field_type_l == "file":
+                if isinstance(field_value, Mapping):
+                    document_url = document_url or PostgresRepo._clean_string(
+                        field_value.get("url")
+                    )
+                    document_file_name = document_file_name or PostgresRepo._clean_string(
+                        field_value.get("fileName") or field_value.get("filename")
+                    )
+                else:
+                    document_url = document_url or field_text
+            elif field_type_l in {"text", "textarea", "select", "radio"} and field_text:
+                fallback_text_values.append(field_text)
+
+        if not specialization and fallback_text_values:
+            specialization = fallback_text_values[0]
+
+        if document_url and document_url.startswith("//"):
+            document_url = f"https:{document_url}"
+
+        return {
+            "applicant_name": applicant_name,
+            "contact_phone": contact_phone,
+            "contact_email": contact_email,
+            "specialization": specialization,
+            "document_url": document_url,
+            "document_file_name": document_file_name,
+            "weblium_referer": payload_json.get("referer"),
+        }
+
+    async def create_or_update_user(
+        self,
+        tg_user_id: int,
+        full_name: str,
+        username: str | None = None,
+        language_code: str | None = None,
+        conn: Connection | None = None,
+    ) -> dict[str, Any]:
+        acquired = await self._acquire_conn(conn)
+        try:
+            row = await acquired.fetchrow(
+                """
+                INSERT INTO users (tg_user_id, username, full_name, language_code, is_active)
+                VALUES ($1, $2, $3, $4, TRUE)
+                ON CONFLICT (tg_user_id) DO UPDATE
+                SET
+                    username = EXCLUDED.username,
+                    full_name = EXCLUDED.full_name,
+                    language_code = EXCLUDED.language_code,
+                    is_active = TRUE,
+                    updated_at = NOW()
+                RETURNING *;
+                """,
+                tg_user_id,
+                username,
+                full_name,
+                language_code,
+            )
+            return _record_to_dict(row) or {}
+        finally:
+            await self._release_conn(acquired, conn)
+
+    async def get_user_by_tg_user_id(
+        self, tg_user_id: int, conn: Connection | None = None
+    ) -> dict[str, Any] | None:
+        acquired = await self._acquire_conn(conn)
+        try:
+            row = await acquired.fetchrow(
+                "SELECT * FROM users WHERE tg_user_id = $1;",
+                tg_user_id,
+            )
+            return _record_to_dict(row)
+        finally:
+            await self._release_conn(acquired, conn)
+
+    async def get_user_panel_data(
+        self,
+        tg_user_id: int,
+        conn: Connection | None = None,
+    ) -> dict[str, Any] | None:
+        acquired = await self._acquire_conn(conn)
+        try:
+            row = await acquired.fetchrow(
+                """
+                SELECT
+                    u.*,
+                    app.id AS application_id,
+                    app.status AS application_status
+                FROM users u
+                LEFT JOIN LATERAL (
+                    SELECT id, status
+                    FROM applications
+                    WHERE tg_user_id = u.tg_user_id
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                ) app ON TRUE
+                WHERE u.tg_user_id = $1
+                LIMIT 1;
+                """,
+                tg_user_id,
+            )
+            return _record_to_dict(row)
+        finally:
+            await self._release_conn(acquired, conn)
+
+    async def list_active_members(
+        self,
+        limit: int,
+        offset: int,
+        conn: Connection | None = None,
+    ) -> list[dict[str, Any]]:
+        acquired = await self._acquire_conn(conn)
+        try:
+            rows = await acquired.fetch(
+                """
+                SELECT
+                    u.tg_user_id,
+                    u.username,
+                    u.full_name,
+                    u.member_since,
+                    u.subscription_expires_at,
+                    u.subscription_status,
+                    app.id AS application_id,
+                    app.status AS application_status
+                FROM users u
+                LEFT JOIN LATERAL (
+                    SELECT id, status
+                    FROM applications
+                    WHERE tg_user_id = u.tg_user_id
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                ) app ON TRUE
+                WHERE u.subscription_status = 'ACTIVE'
+                  AND u.subscription_expires_at IS NOT NULL
+                  AND u.subscription_expires_at > NOW()
+                ORDER BY u.subscription_expires_at ASC, u.tg_user_id ASC
+                LIMIT $1 OFFSET $2;
+                """,
+                limit,
+                offset,
+            )
+            return [dict(row) for row in rows]
+        finally:
+            await self._release_conn(acquired, conn)
+
+    async def list_expiring_members(
+        self,
+        max_days: int,
+        limit: int,
+        offset: int,
+        conn: Connection | None = None,
+    ) -> list[dict[str, Any]]:
+        acquired = await self._acquire_conn(conn)
+        try:
+            rows = await acquired.fetch(
+                """
+                SELECT
+                    u.tg_user_id,
+                    u.username,
+                    u.full_name,
+                    u.member_since,
+                    u.subscription_expires_at,
+                    u.subscription_status,
+                    app.id AS application_id,
+                    app.status AS application_status
+                FROM users u
+                LEFT JOIN LATERAL (
+                    SELECT id, status
+                    FROM applications
+                    WHERE tg_user_id = u.tg_user_id
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                ) app ON TRUE
+                WHERE u.subscription_status = 'ACTIVE'
+                  AND u.subscription_expires_at IS NOT NULL
+                  AND u.subscription_expires_at > NOW()
+                  AND u.subscription_expires_at <= (
+                        NOW() + ($1::int * INTERVAL '1 day')
+                  )
+                ORDER BY u.subscription_expires_at ASC, u.tg_user_id ASC
+                LIMIT $2 OFFSET $3;
+                """,
+                max_days,
+                limit,
+                offset,
+            )
+            return [dict(row) for row in rows]
+        finally:
+            await self._release_conn(acquired, conn)
+
+    async def list_expired_members(
+        self,
+        limit: int,
+        offset: int,
+        conn: Connection | None = None,
+    ) -> list[dict[str, Any]]:
+        acquired = await self._acquire_conn(conn)
+        try:
+            rows = await acquired.fetch(
+                """
+                SELECT
+                    u.tg_user_id,
+                    u.username,
+                    u.full_name,
+                    u.member_since,
+                    u.subscription_expires_at,
+                    u.subscription_status,
+                    app.id AS application_id,
+                    app.status AS application_status
+                FROM users u
+                LEFT JOIN LATERAL (
+                    SELECT id, status
+                    FROM applications
+                    WHERE tg_user_id = u.tg_user_id
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                ) app ON TRUE
+                WHERE u.subscription_status = 'ACTIVE'
+                  AND u.subscription_expires_at IS NOT NULL
+                  AND u.subscription_expires_at <= NOW()
+                ORDER BY u.subscription_expires_at DESC, u.tg_user_id ASC
+                LIMIT $1 OFFSET $2;
+                """,
+                limit,
+                offset,
+            )
+            return [dict(row) for row in rows]
+        finally:
+            await self._release_conn(acquired, conn)
+
+    async def get_member_detail(
+        self,
+        tg_user_id: int,
+        conn: Connection | None = None,
+    ) -> dict[str, Any] | None:
+        acquired = await self._acquire_conn(conn)
+        try:
+            row = await acquired.fetchrow(
+                """
+                SELECT
+                    u.tg_user_id,
+                    u.username,
+                    u.full_name,
+                    u.member_since,
+                    u.subscription_expires_at,
+                    u.subscription_status,
+                    app.id AS application_id,
+                    app.status AS application_status
+                FROM users u
+                LEFT JOIN LATERAL (
+                    SELECT id, status
+                    FROM applications
+                    WHERE tg_user_id = u.tg_user_id
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                ) app ON TRUE
+                WHERE u.tg_user_id = $1
+                LIMIT 1;
+                """,
+                tg_user_id,
+            )
+            return _record_to_dict(row)
+        finally:
+            await self._release_conn(acquired, conn)
+
+    async def get_users_with_subscription_expiring(
+        self,
+        days_left: int,
+        limit: int = 1000,
+        conn: Connection | None = None,
+    ) -> list[dict[str, Any]]:
+        acquired = await self._acquire_conn(conn)
+        try:
+            rows = await acquired.fetch(
+                """
+                SELECT u.*
+                FROM users u
+                WHERE u.subscription_status = 'ACTIVE'
+                  AND u.subscription_expires_at IS NOT NULL
+                  AND DATE(u.subscription_expires_at AT TIME ZONE 'UTC') =
+                      DATE((NOW() AT TIME ZONE 'UTC') + ($1::int * INTERVAL '1 day'))
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM renewal_notifications rn
+                    WHERE rn.tg_user_id = u.tg_user_id
+                      AND rn.subscription_expires_at = u.subscription_expires_at
+                      AND rn.days_left = $1
+                  )
+                ORDER BY u.subscription_expires_at ASC
+                LIMIT $2;
+                """,
+                days_left,
+                limit,
+            )
+            return [dict(row) for row in rows]
+        finally:
+            await self._release_conn(acquired, conn)
+
+    async def mark_renewal_notified(
+        self,
+        tg_user_id: int,
+        subscription_expires_at: datetime,
+        days_left: int,
+        conn: Connection | None = None,
+    ) -> bool:
+        acquired = await self._acquire_conn(conn)
+        try:
+            row = await acquired.fetchrow(
+                """
+                INSERT INTO renewal_notifications (
+                    tg_user_id, subscription_expires_at, days_left
+                )
+                VALUES ($1, $2, $3)
+                ON CONFLICT (tg_user_id, subscription_expires_at, days_left) DO NOTHING
+                RETURNING id;
+                """,
+                tg_user_id,
+                subscription_expires_at,
+                days_left,
+            )
+            return row is not None
+        finally:
+            await self._release_conn(acquired, conn)
+
+    async def get_users_with_expired_subscription(
+        self,
+        limit: int = 1000,
+        conn: Connection | None = None,
+    ) -> list[dict[str, Any]]:
+        acquired = await self._acquire_conn(conn)
+        try:
+            rows = await acquired.fetch(
+                """
+                SELECT *
+                FROM users
+                WHERE subscription_status = 'ACTIVE'
+                  AND subscription_expires_at IS NOT NULL
+                  AND subscription_expires_at <= NOW()
+                ORDER BY subscription_expires_at ASC
+                LIMIT $1;
+                """,
+                limit,
+            )
+            return [dict(row) for row in rows]
+        finally:
+            await self._release_conn(acquired, conn)
+
+    async def create_manual_application(
+        self,
+        tg_user_id: int,
+        applicant_name: str | None = None,
+        status: str = "APPROVED_AWAITING_PAYMENT",
+        conn: Connection | None = None,
+    ) -> dict[str, Any]:
+        acquired = await self._acquire_conn(conn)
+        try:
+            row = await acquired.fetchrow(
+                """
+                INSERT INTO applications (
+                    source,
+                    status,
+                    tg_user_id,
+                    applicant_name
+                )
+                VALUES (
+                    'manual',
+                    $1,
+                    $2,
+                    $3
+                )
+                RETURNING *;
+                """,
+                status,
+                tg_user_id,
+                self._clean_string(applicant_name),
+            )
+            return _record_to_dict(row) or {}
+        finally:
+            await self._release_conn(acquired, conn)
+
+    async def get_application_by_id(
+        self, application_id: int, conn: Connection | None = None
+    ) -> dict[str, Any] | None:
+        acquired = await self._acquire_conn(conn)
+        try:
+            row = await acquired.fetchrow(
+                "SELECT * FROM applications WHERE id = $1;",
+                application_id,
+            )
+            return _record_to_dict(row)
+        finally:
+            await self._release_conn(acquired, conn)
+
+    async def update_application_status(
+        self,
+        application_id: int,
+        status: str,
+        conn: Connection | None = None,
+    ) -> dict[str, Any] | None:
+        acquired = await self._acquire_conn(conn)
+        try:
+            row = await acquired.fetchrow(
+                """
+                UPDATE applications
+                SET status = $2, updated_at = NOW()
+                WHERE id = $1
+                RETURNING *;
+                """,
+                application_id,
+                status,
+            )
+            return _record_to_dict(row)
+        finally:
+            await self._release_conn(acquired, conn)
+
+    async def create_payment(
+        self,
+        application_id: int,
+        amount_minor: int,
+        currency: str,
+        provider: str = "telegram",
+        provider_payment_id: str | None = None,
+        provider_order_id: str | None = None,
+        provider_status: str | None = None,
+        callback_data: str | None = None,
+        callback_signature: str | None = None,
+        signature_valid: bool | None = None,
+        status: str = "PENDING",
+        conn: Connection | None = None,
+    ) -> dict[str, Any]:
+        acquired = await self._acquire_conn(conn)
+        try:
+            row = await acquired.fetchrow(
+                """
+                INSERT INTO payments (
+                    application_id,
+                    provider,
+                    provider_payment_id,
+                    provider_order_id,
+                    provider_status,
+                    callback_data,
+                    callback_signature,
+                    signature_valid,
+                    amount_minor,
+                    currency,
+                    status
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                RETURNING *;
+                """,
+                application_id,
+                provider,
+                provider_payment_id,
+                provider_order_id,
+                provider_status,
+                callback_data,
+                callback_signature,
+                signature_valid,
+                amount_minor,
+                currency,
+                status,
+            )
+            return _record_to_dict(row) or {}
+        finally:
+            await self._release_conn(acquired, conn)
+
+    async def get_payment_by_id(
+        self, payment_id: int, conn: Connection | None = None
+    ) -> dict[str, Any] | None:
+        acquired = await self._acquire_conn(conn)
+        try:
+            row = await acquired.fetchrow(
+                "SELECT * FROM payments WHERE id = $1;",
+                payment_id,
+            )
+            return _record_to_dict(row)
+        finally:
+            await self._release_conn(acquired, conn)
+
+    async def get_payment_by_provider_order_id(
+        self,
+        provider_order_id: str,
+        provider: str = "liqpay",
+        conn: Connection | None = None,
+    ) -> dict[str, Any] | None:
+        acquired = await self._acquire_conn(conn)
+        try:
+            row = await acquired.fetchrow(
+                """
+                SELECT *
+                FROM payments
+                WHERE provider = $1
+                  AND provider_order_id = $2
+                ORDER BY id DESC
+                LIMIT 1;
+                """,
+                provider,
+                provider_order_id,
+            )
+            return _record_to_dict(row)
+        finally:
+            await self._release_conn(acquired, conn)
+
+    async def update_payment_status(
+        self,
+        payment_id: int,
+        new_status: str,
+        provider_payment_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                payment = await conn.fetchrow(
+                    "SELECT * FROM payments WHERE id = $1 FOR UPDATE;",
+                    payment_id,
+                )
+                if payment is None:
+                    return None
+
+                paid_at = _utcnow() if new_status == "PAID" else None
+                updated_payment = await conn.fetchrow(
+                    """
+                    UPDATE payments
+                    SET
+                        status = $2,
+                        provider_payment_id = COALESCE($3, provider_payment_id),
+                        paid_at = CASE WHEN $2 = 'PAID' THEN $4 ELSE paid_at END,
+                        updated_at = NOW()
+                    WHERE id = $1
+                    RETURNING *;
+                    """,
+                    payment_id,
+                    new_status,
+                    provider_payment_id,
+                    paid_at,
+                )
+
+                if new_status == "PAID":
+                    await conn.execute(
+                        """
+                        UPDATE applications
+                        SET status = 'PAID_AWAITING_JOIN', updated_at = NOW()
+                        WHERE id = $1
+                          AND status IN ('APPROVED_AWAITING_PAYMENT', 'UNLINKED_APPLICATION_APPROVED');
+                        """,
+                        payment["application_id"],
+                    )
+
+                return _record_to_dict(updated_payment)
+
+    async def update_liqpay_callback_audit(
+        self,
+        provider_order_id: str,
+        provider_status: str | None,
+        callback_data: str,
+        callback_signature: str,
+        signature_valid: bool,
+        provider: str = "liqpay",
+        conn: Connection | None = None,
+    ) -> dict[str, Any] | None:
+        acquired = await self._acquire_conn(conn)
+        try:
+            row = await acquired.fetchrow(
+                """
+                UPDATE payments
+                SET
+                    provider_status = $3,
+                    callback_data = $4,
+                    callback_signature = $5,
+                    signature_valid = $6,
+                    updated_at = NOW()
+                WHERE provider = $1
+                  AND provider_order_id = $2
+                RETURNING *;
+                """,
+                provider,
+                provider_order_id,
+                provider_status,
+                callback_data,
+                callback_signature,
+                signature_valid,
+            )
+            return _record_to_dict(row)
+        finally:
+            await self._release_conn(acquired, conn)
+
+    async def process_liqpay_success_callback(
+        self,
+        provider_order_id: str,
+        amount_minor: int,
+        currency: str,
+        provider_status: str,
+        callback_data: str,
+        callback_signature: str,
+        signature_valid: bool,
+    ) -> dict[str, Any]:
+        if provider_status != "success":
+            raise ValueError("provider_status must be 'success' for success processing")
+
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                payment_before = await conn.fetchrow(
+                    """
+                    SELECT *
+                    FROM payments
+                    WHERE provider = 'liqpay'
+                      AND provider_order_id = $1
+                    FOR UPDATE;
+                    """,
+                    provider_order_id,
+                )
+                if payment_before is None:
+                    raise ValueError("payment with provider_order_id not found")
+
+                payment_with_audit = await conn.fetchrow(
+                    """
+                    UPDATE payments
+                    SET
+                        provider_status = $2,
+                        callback_data = $3,
+                        callback_signature = $4,
+                        signature_valid = $5,
+                        updated_at = NOW()
+                    WHERE id = $1
+                    RETURNING *;
+                    """,
+                    int(payment_before["id"]),
+                    provider_status,
+                    callback_data,
+                    callback_signature,
+                    signature_valid,
+                )
+                if payment_with_audit is None:
+                    raise ValueError("payment not found during callback audit update")
+
+                if int(payment_with_audit["amount_minor"]) != int(amount_minor):
+                    raise ValueError("callback amount mismatch")
+                if str(payment_with_audit["currency"]).upper() != str(currency).upper():
+                    raise ValueError("callback currency mismatch")
+
+                app_before = await conn.fetchrow(
+                    """
+                    SELECT *
+                    FROM applications
+                    WHERE id = $1
+                    FOR UPDATE;
+                    """,
+                    int(payment_with_audit["application_id"]),
+                )
+                if app_before is None:
+                    raise ValueError("application not found for payment")
+
+                if str(payment_with_audit["status"]) == "PAID":
+                    user_existing = None
+                    tg_user_id = app_before["tg_user_id"]
+                    if tg_user_id is not None:
+                        user_existing = await conn.fetchrow(
+                            "SELECT * FROM users WHERE tg_user_id = $1;",
+                            int(tg_user_id),
+                        )
+
+                    return {
+                        "payment": _record_to_dict(payment_with_audit),
+                        "application": _record_to_dict(app_before),
+                        "user": _record_to_dict(user_existing),
+                        "paid_now": False,
+                    }
+
+                payment_paid = await conn.fetchrow(
+                    """
+                    UPDATE payments
+                    SET
+                        status = 'PAID',
+                        paid_at = COALESCE(paid_at, NOW()),
+                        updated_at = NOW()
+                    WHERE id = $1
+                    RETURNING *;
+                    """,
+                    int(payment_with_audit["id"]),
+                )
+                if payment_paid is None:
+                    raise ValueError("payment not found while marking as PAID")
+
+                await conn.execute(
+                    """
+                    UPDATE applications
+                    SET status = 'PAID_AWAITING_JOIN', updated_at = NOW()
+                    WHERE id = $1
+                      AND status IN ('APPROVED_AWAITING_PAYMENT', 'UNLINKED_APPLICATION_APPROVED');
+                    """,
+                    int(app_before["id"]),
+                )
+                app_after = await conn.fetchrow(
+                    "SELECT * FROM applications WHERE id = $1;",
+                    int(app_before["id"]),
+                )
+
+                user_after = None
+                tg_user_id = app_before["tg_user_id"]
+                if tg_user_id is not None:
+                    user_before = await conn.fetchrow(
+                        """
+                        SELECT *
+                        FROM users
+                        WHERE tg_user_id = $1
+                        FOR UPDATE;
+                        """,
+                        int(tg_user_id),
+                    )
+
+                    now_utc = _utcnow()
+                    expires_at = (
+                        user_before["subscription_expires_at"] if user_before else None
+                    )
+                    base_ts = (
+                        expires_at
+                        if isinstance(expires_at, datetime) and expires_at > now_utc
+                        else now_utc
+                    )
+                    new_expires_at = base_ts + timedelta(days=365)
+
+                    user_after = await conn.fetchrow(
+                        """
+                        UPDATE users
+                        SET
+                            member_since = COALESCE(member_since, NOW()),
+                            subscription_expires_at = $2,
+                            subscription_status = 'ACTIVE',
+                            updated_at = NOW()
+                        WHERE tg_user_id = $1
+                        RETURNING *;
+                        """,
+                        int(tg_user_id),
+                        new_expires_at,
+                    )
+
+                return {
+                    "payment": _record_to_dict(payment_paid),
+                    "application": _record_to_dict(app_after),
+                    "user": _record_to_dict(user_after),
+                    "paid_now": True,
+                }
+
+    async def create_application_token(
+        self,
+        tg_user_id: int,
+        expires_at: datetime,
+        token: str | None = None,
+        application_id: int | None = None,
+        metadata: Mapping[str, Any] | None = None,
+        conn: Connection | None = None,
+    ) -> dict[str, Any]:
+        resolved_token = token or uuid4().hex
+        acquired = await self._acquire_conn(conn)
+        try:
+            row = await acquired.fetchrow(
+                """
+                INSERT INTO application_tokens (
+                    token, tg_user_id, application_id, expires_at, metadata
+                )
+                VALUES ($1, $2, $3, $4, $5::jsonb)
+                RETURNING *;
+                """,
+                resolved_token,
+                tg_user_id,
+                application_id,
+                expires_at,
+                _to_jsonb(metadata),
+            )
+            return _record_to_dict(row) or {}
+        finally:
+            await self._release_conn(acquired, conn)
+
+    async def get_active_application_token(
+        self, tg_user_id: int, conn: Connection | None = None
+    ) -> dict[str, Any] | None:
+        acquired = await self._acquire_conn(conn)
+        try:
+            row = await acquired.fetchrow(
+                """
+                SELECT *
+                FROM application_tokens
+                WHERE tg_user_id = $1
+                  AND used_at IS NULL
+                  AND expires_at > NOW()
+                ORDER BY created_at DESC
+                LIMIT 1;
+                """,
+                tg_user_id,
+            )
+            return _record_to_dict(row)
+        finally:
+            await self._release_conn(acquired, conn)
+
+    async def get_token_record(
+        self, token: str, conn: Connection | None = None
+    ) -> dict[str, Any] | None:
+        acquired = await self._acquire_conn(conn)
+        try:
+            row = await acquired.fetchrow(
+                "SELECT * FROM application_tokens WHERE token = $1;",
+                token,
+            )
+            return _record_to_dict(row)
+        finally:
+            await self._release_conn(acquired, conn)
+
+    async def mark_application_token_used(
+        self,
+        token: str,
+        conn: Connection | None = None,
+    ) -> dict[str, Any] | None:
+        acquired = await self._acquire_conn(conn)
+        try:
+            row = await acquired.fetchrow(
+                """
+                UPDATE application_tokens
+                SET used_at = NOW()
+                WHERE token = $1
+                  AND used_at IS NULL
+                RETURNING *;
+                """,
+                token,
+            )
+            return _record_to_dict(row)
+        finally:
+            await self._release_conn(acquired, conn)
+
+    async def merge_application_token_metadata(
+        self,
+        token: str,
+        metadata: Mapping[str, Any],
+        conn: Connection | None = None,
+    ) -> dict[str, Any] | None:
+        acquired = await self._acquire_conn(conn)
+        try:
+            row = await acquired.fetchrow(
+                """
+                UPDATE application_tokens
+                SET metadata = COALESCE(metadata, '{}'::jsonb) || $2::jsonb
+                WHERE token = $1
+                RETURNING *;
+                """,
+                token,
+                _to_jsonb(metadata),
+            )
+            return _record_to_dict(row)
+        finally:
+            await self._release_conn(acquired, conn)
+
+    async def create_bind_token(
+        self,
+        application_id: int,
+        expires_at: datetime,
+        token: str | None = None,
+        metadata: Mapping[str, Any] | None = None,
+        conn: Connection | None = None,
+    ) -> dict[str, Any]:
+        resolved_token = token or uuid4().hex
+        acquired = await self._acquire_conn(conn)
+        try:
+            row = await acquired.fetchrow(
+                """
+                INSERT INTO bind_tokens (
+                    token, application_id, expires_at, metadata
+                )
+                VALUES ($1, $2, $3, $4::jsonb)
+                RETURNING *;
+                """,
+                resolved_token,
+                application_id,
+                expires_at,
+                _to_jsonb(metadata),
+            )
+            return _record_to_dict(row) or {}
+        finally:
+            await self._release_conn(acquired, conn)
+
+    async def get_bind_token(
+        self, token: str, conn: Connection | None = None
+    ) -> dict[str, Any] | None:
+        acquired = await self._acquire_conn(conn)
+        try:
+            row = await acquired.fetchrow(
+                "SELECT * FROM bind_tokens WHERE token = $1;",
+                token,
+            )
+            return _record_to_dict(row)
+        finally:
+            await self._release_conn(acquired, conn)
+
+    async def mark_bind_token_used(
+        self,
+        token: str,
+        tg_user_id: int | None = None,
+        conn: Connection | None = None,
+    ) -> dict[str, Any] | None:
+        acquired = await self._acquire_conn(conn)
+        try:
+            row = await acquired.fetchrow(
+                """
+                UPDATE bind_tokens
+                SET
+                    used_at = NOW(),
+                    claimed_tg_user_id = COALESCE($2, claimed_tg_user_id)
+                WHERE token = $1
+                  AND used_at IS NULL
+                RETURNING *;
+                """,
+                token,
+                tg_user_id,
+            )
+            return _record_to_dict(row)
+        finally:
+            await self._release_conn(acquired, conn)
+
+    async def webhook_event_exists(
+        self,
+        event_key: str,
+        provider: str = "weblium",
+        conn: Connection | None = None,
+    ) -> bool:
+        acquired = await self._acquire_conn(conn)
+        try:
+            row = await acquired.fetchval(
+                """
+                SELECT 1
+                FROM webhook_events
+                WHERE provider = $1 AND event_key = $2
+                LIMIT 1;
+                """,
+                provider,
+                event_key,
+            )
+            return row is not None
+        finally:
+            await self._release_conn(acquired, conn)
+
+    async def create_webhook_event(
+        self,
+        event_key: str,
+        request_path: str,
+        source_ip: str | None = None,
+        headers: Mapping[str, Any] | None = None,
+        query_params: Mapping[str, Any] | None = None,
+        payload_raw: str | None = None,
+        payload_json: Mapping[str, Any] | None = None,
+        provider: str = "weblium",
+    ) -> dict[str, Any]:
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                INSERT INTO webhook_events (
+                    provider, event_key, request_path, source_ip, headers, query_params, payload_raw, payload_json
+                )
+                VALUES (
+                    $1, $2, $3, $4::inet, $5::jsonb, $6::jsonb, $7, $8::jsonb
+                )
+                ON CONFLICT (provider, event_key) DO NOTHING
+                RETURNING *, TRUE AS is_new;
+                """,
+                provider,
+                event_key,
+                request_path,
+                source_ip,
+                _to_jsonb(headers),
+                _to_jsonb(query_params),
+                payload_raw,
+                _to_jsonb(payload_json),
+            )
+
+            if row is not None:
+                return _record_to_dict(row) or {}
+
+            existing = await conn.fetchrow(
+                """
+                SELECT *, FALSE AS is_new
+                FROM webhook_events
+                WHERE provider = $1 AND event_key = $2;
+                """,
+                provider,
+                event_key,
+            )
+            return _record_to_dict(existing) or {}
+
+    async def mark_webhook_event_processed(
+        self,
+        event_id: int,
+        processing_status: str = "PROCESSED",
+        processing_error: str | None = None,
+        application_id: int | None = None,
+        conn: Connection | None = None,
+    ) -> dict[str, Any] | None:
+        acquired = await self._acquire_conn(conn)
+        try:
+            row = await acquired.fetchrow(
+                """
+                UPDATE webhook_events
+                SET
+                    processing_status = $2,
+                    processing_error = $3,
+                    application_id = COALESCE($4, application_id),
+                    processed_at = NOW()
+                WHERE id = $1
+                RETURNING *;
+                """,
+                event_id,
+                processing_status,
+                processing_error,
+                application_id,
+            )
+            return _record_to_dict(row)
+        finally:
+            await self._release_conn(acquired, conn)
+
+    async def create_matched_application_from_webhook(
+        self,
+        tg_user_id: int,
+        payload_json: Mapping[str, Any],
+        application_token: str | None = None,
+        webhook_event_id: int | None = None,
+    ) -> dict[str, Any]:
+        extracted = self._extract_weblium_fields(payload_json)
+
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                if application_token:
+                    token_row = await conn.fetchrow(
+                        """
+                        SELECT *
+                        FROM application_tokens
+                        WHERE token = $1
+                          AND used_at IS NULL
+                          AND expires_at > NOW()
+                        FOR UPDATE;
+                        """,
+                        application_token,
+                    )
+                    if token_row is None:
+                        raise ValueError("application token is missing/expired/already used")
+                    if token_row["tg_user_id"] != tg_user_id:
+                        raise ValueError("application token does not belong to this tg_user_id")
+
+                    await conn.execute(
+                        """
+                        UPDATE application_tokens
+                        SET used_at = NOW()
+                        WHERE id = $1;
+                        """,
+                        token_row["id"],
+                    )
+
+                app_row = await conn.fetchrow(
+                    """
+                    INSERT INTO applications (
+                        source,
+                        status,
+                        tg_user_id,
+                        contact_phone,
+                        contact_email,
+                        applicant_name,
+                        specialization,
+                        document_url,
+                        document_file_name,
+                        weblium_referer
+                    )
+                    VALUES (
+                        'bot_link',
+                        'APPLICATION_PENDING',
+                        $1, $2, $3, $4, $5, $6, $7, $8
+                    )
+                    RETURNING *;
+                    """,
+                    tg_user_id,
+                    extracted["contact_phone"],
+                    extracted["contact_email"],
+                    extracted["applicant_name"],
+                    extracted["specialization"],
+                    extracted["document_url"],
+                    extracted["document_file_name"],
+                    extracted["weblium_referer"],
+                )
+
+                if webhook_event_id is not None:
+                    await conn.execute(
+                        """
+                        UPDATE webhook_events
+                        SET
+                            application_id = $2,
+                            processing_status = 'PROCESSED',
+                            processed_at = NOW()
+                        WHERE id = $1;
+                        """,
+                        webhook_event_id,
+                        app_row["id"],
+                    )
+
+                return _record_to_dict(app_row) or {}
+
+    async def create_unlinked_application_from_webhook(
+        self,
+        payload_json: Mapping[str, Any],
+        webhook_event_id: int | None = None,
+    ) -> dict[str, Any]:
+        extracted = self._extract_weblium_fields(payload_json)
+
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                app_row = await conn.fetchrow(
+                    """
+                    INSERT INTO applications (
+                        source,
+                        status,
+                        tg_user_id,
+                        contact_phone,
+                        contact_email,
+                        applicant_name,
+                        specialization,
+                        document_url,
+                        document_file_name,
+                        weblium_referer
+                    )
+                    VALUES (
+                        'site_direct',
+                        'UNLINKED_APPLICATION_PENDING',
+                        NULL, $1, $2, $3, $4, $5, $6, $7
+                    )
+                    RETURNING *;
+                    """,
+                    extracted["contact_phone"],
+                    extracted["contact_email"],
+                    extracted["applicant_name"],
+                    extracted["specialization"],
+                    extracted["document_url"],
+                    extracted["document_file_name"],
+                    extracted["weblium_referer"],
+                )
+
+                if webhook_event_id is not None:
+                    await conn.execute(
+                        """
+                        UPDATE webhook_events
+                        SET
+                            application_id = $2,
+                            processing_status = 'PROCESSED',
+                            processed_at = NOW()
+                        WHERE id = $1;
+                        """,
+                        webhook_event_id,
+                        app_row["id"],
+                    )
+
+                return _record_to_dict(app_row) or {}
+
+    async def get_unlinked_application_candidates_by_phone(
+        self, phone: str, limit: int = 20, conn: Connection | None = None
+    ) -> list[dict[str, Any]]:
+        acquired = await self._acquire_conn(conn)
+        try:
+            rows = await acquired.fetch(
+                """
+                SELECT *
+                FROM applications
+                WHERE tg_user_id IS NULL
+                  AND contact_phone = $1
+                  AND status IN ('UNLINKED_APPLICATION_PENDING', 'UNLINKED_APPLICATION_APPROVED')
+                ORDER BY created_at DESC
+                LIMIT $2;
+                """,
+                phone,
+                limit,
+            )
+            return [dict(row) for row in rows]
+        finally:
+            await self._release_conn(acquired, conn)
+
+    async def get_unlinked_application_candidates_by_email(
+        self, email: str, limit: int = 20, conn: Connection | None = None
+    ) -> list[dict[str, Any]]:
+        acquired = await self._acquire_conn(conn)
+        try:
+            rows = await acquired.fetch(
+                """
+                SELECT *
+                FROM applications
+                WHERE tg_user_id IS NULL
+                  AND lower(contact_email) = lower($1)
+                  AND status IN ('UNLINKED_APPLICATION_PENDING', 'UNLINKED_APPLICATION_APPROVED')
+                ORDER BY created_at DESC
+                LIMIT $2;
+                """,
+                email,
+                limit,
+            )
+            return [dict(row) for row in rows]
+        finally:
+            await self._release_conn(acquired, conn)
+
+    async def bind_application_to_tg_user(
+        self,
+        application_id: int,
+        tg_user_id: int,
+        bind_token: str | None = None,
+        new_status: str = "APPLICATION_PENDING",
+    ) -> dict[str, Any]:
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                app_before = await conn.fetchrow(
+                    """
+                    SELECT *
+                    FROM applications
+                    WHERE id = $1
+                    FOR UPDATE;
+                    """,
+                    application_id,
+                )
+                if app_before is None:
+                    raise ValueError("application not found")
+
+                current_tg_user_id = app_before["tg_user_id"]
+                if current_tg_user_id is not None:
+                    if (
+                        current_tg_user_id == tg_user_id
+                        and app_before["status"] == new_status
+                    ):
+                        return _record_to_dict(app_before) or {}
+                    raise ValueError("application already linked to another tg_user_id")
+
+                if app_before["status"] not in {
+                    "UNLINKED_APPLICATION_PENDING",
+                    "UNLINKED_APPLICATION_APPROVED",
+                }:
+                    raise ValueError(
+                        f"application is not bindable from status {app_before['status']}"
+                    )
+
+                if bind_token:
+                    bind_row = await conn.fetchrow(
+                        """
+                        SELECT *
+                        FROM bind_tokens
+                        WHERE token = $1
+                          AND used_at IS NULL
+                          AND expires_at > NOW()
+                        FOR UPDATE;
+                        """,
+                        bind_token,
+                    )
+                    if bind_row is None:
+                        raise ValueError("bind token is missing/expired/already used")
+                    if bind_row["application_id"] != application_id:
+                        raise ValueError("bind token does not match application_id")
+
+                    await conn.execute(
+                        """
+                        UPDATE bind_tokens
+                        SET used_at = NOW(), claimed_tg_user_id = $2
+                        WHERE id = $1;
+                        """,
+                        bind_row["id"],
+                        tg_user_id,
+                    )
+
+                app_row = await conn.fetchrow(
+                    """
+                    UPDATE applications
+                    SET
+                        tg_user_id = $2,
+                        status = $3,
+                        updated_at = NOW()
+                    WHERE id = $1
+                    RETURNING *;
+                    """,
+                    application_id,
+                    tg_user_id,
+                    new_status,
+                )
+                if app_row is None:
+                    raise ValueError("application not found")
+
+                return _record_to_dict(app_row) or {}
+
+
+
+
+
