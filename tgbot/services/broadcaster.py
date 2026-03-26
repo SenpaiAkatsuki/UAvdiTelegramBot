@@ -6,6 +6,12 @@ from aiogram import Bot
 from aiogram import exceptions
 from aiogram.types import InlineKeyboardMarkup
 
+"""
+Broadcast utilities.
+
+Safe send helpers for user/admin notifications with Telegram API error handling.
+"""
+
 
 async def send_message(
     bot: Bot,
@@ -14,16 +20,7 @@ async def send_message(
     disable_notification: bool = False,
     reply_markup: InlineKeyboardMarkup = None,
 ) -> bool:
-    """
-    Safe messages sender
-
-    :param bot: Bot instance.
-    :param user_id: user id. If str - must contain only digits.
-    :param text: text of the message.
-    :param disable_notification: disable notification or not.
-    :param reply_markup: reply markup.
-    :return: success.
-    """
+    # Send message with resilient Telegram error handling.
     try:
         await bot.send_message(
             user_id,
@@ -58,15 +55,7 @@ async def broadcast(
     disable_notification: bool = False,
     reply_markup: InlineKeyboardMarkup = None,
 ) -> int:
-    """
-    Simple broadcaster.
-    :param bot: Bot instance.
-    :param users: List of users.
-    :param text: Text of the message.
-    :param disable_notification: Disable notification or not.
-    :param reply_markup: Reply markup.
-    :return: Count of messages.
-    """
+    # Broadcast message sequentially with per-user safe send.
     count = 0
     try:
         for user_id in users:

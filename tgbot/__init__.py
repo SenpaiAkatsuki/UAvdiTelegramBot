@@ -1,0 +1,3 @@
+"""
+tgbot package root.
+"""
