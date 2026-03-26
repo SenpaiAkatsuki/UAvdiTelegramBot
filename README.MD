@@ -36,12 +36,19 @@ It also includes:
 
 ## Local run (without Docker)
 
-1. Copy `.env.dist` to `.env` and fill required values.
-2. Install dependencies:
+1. Rename `.env.dist` to `.env` and fill required values.
+2. Configure DB connection in `.env`:
+   - `DB_HOST`
+   - `DB_PORT`
+   - `DB_USER`
+   - `DB_PASSWORD`
+   - `DB_NAME`
+3. Make sure PostgreSQL is running and the database from `DB_NAME` exists.
+4. Install dependencies:
    - `pip install -r requirements.txt`
-3. Start webhook app:
+5. Start webhook app:
    - `python -m infrastructure.api.weblium_app`
-4. Start bot:
+6. Start bot:
    - `python bot.py`
 
 ## Docker Compose run
