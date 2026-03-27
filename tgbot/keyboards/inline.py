@@ -13,8 +13,8 @@ def very_simple_keyboard() -> InlineKeyboardMarkup:
     # Legacy static keyboard version for demo.
     buttons = [
         [
-            InlineKeyboardButton(text="Create order", callback_data="create_order"),
-            InlineKeyboardButton(text="My orders", callback_data="my_orders"),
+            InlineKeyboardButton(text="➕ Створити замовлення", callback_data="create_order"),
+            InlineKeyboardButton(text="📦 Мої замовлення", callback_data="my_orders"),
         ],
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
@@ -23,8 +23,8 @@ def very_simple_keyboard() -> InlineKeyboardMarkup:
 def simple_menu_keyboard() -> InlineKeyboardMarkup:
     # Builder-based keyboard for demo menu actions.
     keyboard = InlineKeyboardBuilder()
-    keyboard.button(text="Create order", callback_data="create_order")
-    keyboard.button(text="My orders", callback_data="my_orders")
+    keyboard.button(text="➕ Створити замовлення", callback_data="create_order")
+    keyboard.button(text="📦 Мої замовлення", callback_data="my_orders")
     return keyboard.as_markup()
 
 
@@ -38,7 +38,7 @@ def my_orders_keyboard(orders: list[dict]) -> InlineKeyboardMarkup:
     keyboard = InlineKeyboardBuilder()
     for order in orders:
         keyboard.button(
-            text=f"Order: {order['title']}",
+            text=f"Замовлення: {order['title']}",
             callback_data=OrderCallbackData(order_id=order["id"]),
         )
     return keyboard.as_markup()

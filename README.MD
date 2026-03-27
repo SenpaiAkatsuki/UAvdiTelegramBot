@@ -11,10 +11,10 @@ Telegram bot project with:
 This bot automates a closed membership flow:
 
 1. A person submits an application from site or bot link.
-2. Admins review and vote in Telegram.
+2. Admins review and vote in a separate admin Telegram group.
 3. Approved users pay yearly subscription through LiqPay.
 4. After successful callback verification, subscription is activated.
-5. User gets access to the private Telegram group.
+5. User gets access to the shared/private member Telegram group.
 
 It also includes:
 
@@ -64,8 +64,23 @@ Run:
 
 - `docker compose up --build`
 
+## Tests and CI
+
+- Local unit tests:
+  - `pip install -r requirements.txt -r requirements-dev.txt`
+  - `pytest`
+- Optional smoke tests:
+  - PowerShell: `$env:RUN_WEBLIUM_SMOKE_TESTS=1; pytest`
+  - Bash: `RUN_WEBLIUM_SMOKE_TESTS=1 pytest`
+- GitHub Actions workflow:
+  - `.github/workflows/ci.yml` runs compile check + tests on push/PR.
+  - Smoke tests can be enabled manually in `workflow_dispatch`.
+
 ## Notes
 
 - Project does not use SQLAlchemy or Alembic.
 - Payments are handled by LiqPay checkout + callback verification.
 - Subscription and admin menu logic are in `tgbot/handlers` and `tgbot/services`.
+- Weblium webhook supports optional HMAC signature validation (`WEBHOOK_SIGNATURE_SECRET` + `WEBHOOK_SIGNATURE_HEADER`).
+- Voting chat is configured by `VOTING_CHAT_ID` and should be different from `CHAT_MEMBERSHIP_CHAT_ID`.
+- Legacy one-chat mode is possible only with `VOTING_ALLOW_SHARED_CHAT=true`.

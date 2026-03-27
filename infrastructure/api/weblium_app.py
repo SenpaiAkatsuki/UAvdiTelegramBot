@@ -2,6 +2,7 @@
 
 import base64
 import hashlib
+import hmac
 import json
 import logging
 import secrets
@@ -43,6 +44,30 @@ PRIMARY_WEBLIUM_PATH = "/webhooks/weblium/application"
 PRIMARY_LIQPAY_CALLBACK_PATH = "/webhooks/liqpay/callback"
 PRIMARY_LIQPAY_PAY_PATH = "/pay/liqpay/{payment_id}"
 BIND_TOKEN_TTL_DAYS = 7
+
+
+@web.middleware
+async def unhandled_error_middleware(
+    request: web.Request,
+    handler,
+) -> web.StreamResponse:
+    # Convert unhandled aiohttp errors to controlled 500 responses.
+    try:
+        return await handler(request)
+    except web.HTTPException:
+        raise
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "Unhandled webhook app error. method=%s path=%s",
+            request.method,
+            request.path,
+        )
+        if request.path.startswith("/webhooks/"):
+            return web.json_response(
+                {"ok": False, "error": "internal server error"},
+                status=500,
+            )
+        return web.Response(status=500, text="internal server error")
 
 
 def _as_string(value: Any) -> str | None:
@@ -127,6 +152,60 @@ def _is_ip_allowed(client_ip: str | None, trusted_proxy_ips: list[str]) -> bool:
         if client in ip_network(raw_network, strict=False):
             return True
     return False
+
+
+def _is_hex_string(value: str) -> bool:
+    value = value.strip()
+    if not value or len(value) % 2 != 0:
+        return False
+    return all(ch in "0123456789abcdefABCDEF" for ch in value)
+
+
+def _extract_signature_candidate(
+    request: web.Request,
+    signature_header: str,
+) -> str | None:
+    # Extract webhook signature from configured header.
+    header_name = signature_header.strip()
+    if not header_name:
+        return None
+    value = request.headers.get(header_name)
+    if not value:
+        return None
+    value = value.strip()
+    return value or None
+
+
+def _is_webhook_signature_valid(
+    request: web.Request,
+    raw_body: bytes,
+    signature_secret: str,
+    signature_header: str,
+) -> bool:
+    # Validate HMAC-SHA256 signature over raw body.
+    if not signature_secret:
+        return True
+
+    candidate = _extract_signature_candidate(request, signature_header)
+    if not candidate:
+        return False
+
+    digest = hmac.new(
+        signature_secret.encode("utf-8"),
+        raw_body,
+        hashlib.sha256,
+    ).digest()
+    expected_hex = digest.hex()
+    expected_b64 = base64.b64encode(digest).decode("utf-8")
+
+    normalized = candidate
+    if normalized.lower().startswith("sha256="):
+        normalized = normalized.split("=", 1)[1].strip()
+
+    if _is_hex_string(normalized):
+        return secrets.compare_digest(normalized.lower(), expected_hex)
+
+    return secrets.compare_digest(normalized, expected_b64)
 
 
 def _extract_tg_token_from_referer(referer: str | None) -> str | None:
@@ -313,14 +392,14 @@ def _build_liqpay_checkout_html(data: str, signature: str) -> str:
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <title>Redirecting to LiqPay</title>
+    <title>Перехід до LiqPay</title>
   </head>
   <body>
-    <p>Redirecting to LiqPay checkout...</p>
+    <p>🔄 Переадресація на сторінку оплати LiqPay...</p>
     <form id="liqpay_checkout" method="POST" action="https://www.liqpay.ua/api/3/checkout">
       <input type="hidden" name="data" value="{data_escaped}" />
       <input type="hidden" name="signature" value="{signature_escaped}" />
-      <noscript><button type="submit">Continue to LiqPay</button></noscript>
+      <noscript><button type="submit">Перейти до LiqPay</button></noscript>
     </form>
     <script>document.getElementById('liqpay_checkout').submit();</script>
   </body>
@@ -345,7 +424,7 @@ def _build_unlinked_vote_text(
 ) -> str:
     return (
         build_application_vote_text(dict(application), branch="unlinked")
-        + f"\nbind_token={bind_token}"
+        + f"\n\n🔗 Токен привʼязки: {bind_token}"
     )
 
 
@@ -410,6 +489,16 @@ async def weblium_application_webhook(request: web.Request) -> web.Response:
     if not _is_secret_valid(request, payload, config.webhook.weblium_secret):
         return web.json_response(
             {"ok": False, "error": "invalid webhook secret"},
+            status=401,
+        )
+    if not _is_webhook_signature_valid(
+        request=request,
+        raw_body=raw_body,
+        signature_secret=config.webhook.signature_secret,
+        signature_header=config.webhook.signature_header,
+    ):
+        return web.json_response(
+            {"ok": False, "error": "invalid webhook signature"},
             status=401,
         )
 
@@ -478,7 +567,7 @@ async def weblium_application_webhook(request: web.Request) -> web.Response:
                     bot=bot,
                     user_id=tg_user_id,
                     text=(
-                        "Your application was received from the website and is now under review."
+                        "✅ Вашу заявку з сайту отримано. Зараз вона на розгляді."
                     ),
                     context={
                         "event": "weblium_application_pending",
@@ -565,20 +654,20 @@ async def liqpay_pay_page(request: web.Request) -> web.Response:
 
     payment_id_raw = _as_string(request.match_info.get("payment_id"))
     if not payment_id_raw or not payment_id_raw.isdigit():
-        return web.Response(status=404, text="payment not found")
+        return web.Response(status=404, text="платіж не знайдено")
 
     payment = await repo.get_payment_by_id(int(payment_id_raw))
     if payment is None or str(payment.get("provider")) != "liqpay":
-        return web.Response(status=404, text="payment not found")
+        return web.Response(status=404, text="платіж не знайдено")
 
     payment_status = str(payment.get("status"))
     if payment_status == "PAID":
         return web.Response(
-            text="<html><body><p>Payment is already confirmed.</p></body></html>",
+            text="<html><body><p>✅ Платіж уже підтверджено.</p></body></html>",
             content_type="text/html",
         )
     if payment_status != "PENDING":
-        return web.Response(status=400, text="payment is not active")
+        return web.Response(status=400, text="платіж неактивний")
 
     try:
         payload = _build_liqpay_checkout_payload(config, payment)
@@ -685,11 +774,11 @@ async def liqpay_callback_webhook(request: web.Request) -> web.Response:
                 bot=bot,
                 user_id=int(tg_user_id),
                 text=(
-                    "Payment confirmed. Your 365-day subscription is active.\n"
+                    "✅ Платіж підтверджено. Ваша підписка на 365 днів активна.\n"
                     + (
-                        "You can now request group access."
+                        "🔐 Тепер ви можете запросити доступ до групи."
                         if show_group_access
-                        else "Your access is already active."
+                        else "✅ Ваш доступ уже активний."
                     )
                 ),
                 reply_markup=group_access_keyboard() if show_group_access else None,
@@ -738,7 +827,7 @@ async def _on_cleanup(app: web.Application) -> None:
 
 def create_app(config: Config | None = None) -> web.Application:
     resolved_config = config or load_config(".env")
-    app = web.Application()
+    app = web.Application(middlewares=[unhandled_error_middleware])
     app["config"] = resolved_config
 
     app.router.add_post(PRIMARY_WEBLIUM_PATH, weblium_application_webhook)

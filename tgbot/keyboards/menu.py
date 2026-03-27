@@ -45,7 +45,7 @@ def menu_entry_keyboard(is_admin: bool = False) -> InlineKeyboardMarkup:
     target_scope = SCOPE_ADMIN if is_admin else SCOPE_USER
     target_view = VIEW_ADMIN_ROOT if is_admin else VIEW_USER_ROOT
     keyboard.button(
-        text="Menu",
+        text="📋 Меню",
         callback_data=MenuCallbackData(scope=target_scope, view=target_view),
     )
     keyboard.adjust(1)
@@ -56,12 +56,12 @@ def user_root_keyboard(is_admin: bool) -> InlineKeyboardMarkup:
     # User root menu with optional admin panel entry.
     keyboard = InlineKeyboardBuilder()
     keyboard.button(
-        text="Profile",
+        text="👤 Профіль",
         callback_data=MenuCallbackData(scope=SCOPE_USER, view=VIEW_PROFILE),
     )
     if is_admin:
         keyboard.button(
-            text="Admin panel",
+            text="🛠 Адмін-панель",
             callback_data=MenuCallbackData(scope=SCOPE_ADMIN, view=VIEW_ADMIN_ROOT),
         )
     keyboard.adjust(1)
@@ -77,14 +77,14 @@ def user_profile_keyboard(
     # Profile screen actions: renew, get group access, and back.
     keyboard = InlineKeyboardBuilder()
     if show_renew:
-        keyboard.button(text="Renew", callback_data="membership_pay")
+        keyboard.button(text="💳 Продовжити підписку", callback_data="membership_pay")
     if show_group_access:
         keyboard.button(
-            text="Get group access",
+            text="🔐 Отримати доступ до групи",
             callback_data="membership_get_group_access",
         )
     keyboard.button(
-        text="Back",
+        text="⬅️ Назад",
         callback_data=MenuCallbackData(
             scope=SCOPE_ADMIN if back_to_admin else SCOPE_USER,
             view=VIEW_ADMIN_ROOT if back_to_admin else VIEW_USER_ROOT,
@@ -98,11 +98,11 @@ def admin_root_keyboard() -> InlineKeyboardMarkup:
     # Admin root split into profile and management sections.
     keyboard = InlineKeyboardBuilder()
     keyboard.button(
-        text="Profile",
+        text="👤 Профіль",
         callback_data=MenuCallbackData(scope=SCOPE_ADMIN, view=VIEW_PROFILE),
     )
     keyboard.button(
-        text="Management",
+        text="🧭 Керування",
         callback_data=MenuCallbackData(scope=SCOPE_ADMIN, view=VIEW_ADMIN_MANAGEMENT),
     )
     keyboard.adjust(2)
@@ -113,26 +113,26 @@ def admin_management_keyboard() -> InlineKeyboardMarkup:
     # Admin management screens navigation.
     keyboard = InlineKeyboardBuilder()
     keyboard.button(
-        text="Active members",
+        text="✅ Активні учасники",
         callback_data=MenuCallbackData(scope=SCOPE_ADMIN, view=VIEW_ADMIN_ACTIVE, page=0),
     )
     keyboard.button(
-        text="Expiring <=30 days",
+        text="⏳ Закінчуються ≤30 днів",
         callback_data=MenuCallbackData(scope=SCOPE_ADMIN, view=VIEW_ADMIN_EXPIRING, page=0),
     )
     keyboard.button(
-        text="Expired",
+        text="❌ Прострочені",
         callback_data=MenuCallbackData(scope=SCOPE_ADMIN, view=VIEW_ADMIN_EXPIRED, page=0),
     )
     keyboard.button(
-        text="Subscription price (UAH)",
+        text="💰 Ціна підписки (грн)",
         callback_data=MenuCallbackData(
             scope=SCOPE_ADMIN,
             view=VIEW_ADMIN_SUBSCRIPTION_PRICE,
         ),
     )
     keyboard.button(
-        text="Back",
+        text="⬅️ Назад",
         callback_data=MenuCallbackData(scope=SCOPE_ADMIN, view=VIEW_ADMIN_ROOT),
     )
     keyboard.adjust(2, 2, 1)
@@ -143,7 +143,7 @@ def admin_subscription_price_keyboard() -> InlineKeyboardMarkup:
     # Price management action keyboard.
     keyboard = InlineKeyboardBuilder()
     keyboard.button(
-        text="Set new price",
+        text="✍️ Встановити нову ціну",
         callback_data=MenuCallbackData(
             scope=SCOPE_ADMIN,
             view=VIEW_ADMIN_SUBSCRIPTION_PRICE,
@@ -151,7 +151,7 @@ def admin_subscription_price_keyboard() -> InlineKeyboardMarkup:
         ),
     )
     keyboard.button(
-        text="Back",
+        text="⬅️ Назад",
         callback_data=MenuCallbackData(
             scope=SCOPE_ADMIN,
             view=VIEW_ADMIN_MANAGEMENT,
@@ -192,7 +192,7 @@ def admin_members_list_keyboard(
     if has_prev:
         nav_row.append(
             InlineKeyboardButton(
-                text="Prev",
+                text="◀️ Назад",
                 callback_data=MenuCallbackData(
                     scope=SCOPE_ADMIN,
                     view=list_view,
@@ -203,7 +203,7 @@ def admin_members_list_keyboard(
     if has_next:
         nav_row.append(
             InlineKeyboardButton(
-                text="Next",
+                text="Далі ▶️",
                 callback_data=MenuCallbackData(
                     scope=SCOPE_ADMIN,
                     view=list_view,
@@ -217,7 +217,7 @@ def admin_members_list_keyboard(
     rows.append(
         [
             InlineKeyboardButton(
-                text="Back",
+                text="⬅️ Назад",
                 callback_data=MenuCallbackData(
                     scope=SCOPE_ADMIN,
                     view=VIEW_ADMIN_MANAGEMENT,
@@ -232,7 +232,7 @@ def admin_user_detail_keyboard(*, back_view: str, page: int) -> InlineKeyboardMa
     # Back button from member detail to source list page.
     keyboard = InlineKeyboardBuilder()
     keyboard.button(
-        text="Back",
+        text="⬅️ Назад",
         callback_data=MenuCallbackData(
             scope=SCOPE_ADMIN,
             view=back_view,
@@ -247,7 +247,7 @@ def admin_denied_keyboard() -> InlineKeyboardMarkup:
     # Fallback keyboard when non-admin opens admin scope.
     keyboard = InlineKeyboardBuilder()
     keyboard.button(
-        text="Back",
+        text="⬅️ Назад",
         callback_data=MenuCallbackData(scope=SCOPE_USER, view=VIEW_USER_ROOT),
     )
     keyboard.adjust(1)

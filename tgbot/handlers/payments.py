@@ -198,12 +198,12 @@ async def admin_test_pay_link(
 ) -> None:
     # Admin-only helper to create a direct LiqPay test link.
     if message.from_user is None:
-        await message.answer("Unable to identify user.", parse_mode=None)
+        await message.answer("⚠️ Не вдалося визначити користувача.", parse_mode=None)
         return
 
     if not config.payments.enabled:
         await message.answer(
-            "Payments are temporarily unavailable (PAYMENTS_ENABLED=false).",
+            "⚠️ Платежі тимчасово недоступні (PAYMENTS_ENABLED=false).",
             parse_mode=None,
         )
         return
@@ -213,7 +213,7 @@ async def admin_test_pay_link(
 
     arg_application_id = parse_int_argument(message)
     if arg_application_id == -1:
-        await message.answer("Usage: /pay [application_id_number]", parse_mode=None)
+        await message.answer("Використання: /pay [application_id_number]", parse_mode=None)
         return
 
     if arg_application_id is None:
@@ -230,7 +230,7 @@ async def admin_test_pay_link(
                 applicant_name=message.from_user.full_name,
                 status="APPROVED_AWAITING_PAYMENT",
             )
-            status_hint = f"{application.get('status', '-')} (auto-created test application)"
+            status_hint = f"{application.get('status', '-')} (автостворена тестова заявка)"
         else:
             status_hint = str(application.get("status") or "-")
         target_application_id = int(application["id"])
@@ -238,7 +238,7 @@ async def admin_test_pay_link(
         application = await repo.get_application_by_id(arg_application_id)
         if application is None:
             await message.answer(
-                f"Application not found: {arg_application_id}",
+                f"⚠️ Заявку не знайдено: {arg_application_id}",
                 parse_mode=None,
             )
             return
@@ -254,11 +254,11 @@ async def admin_test_pay_link(
     amount_uah = f"{int(payment['amount_minor']) / 100:.2f}"
     pay_url = config.liqpay.build_pay_url(int(payment["id"]))
     await message.answer(
-        "Admin test payment link created.\n"
+        "🧪 Тестове платіжне посилання для адміністратора створено.\n"
         f"application_id={target_application_id}, status={status_hint}\n"
         f"payment_id={int(payment['id'])}, payment_status={payment['status']}, amount={amount_uah} UAH\n\n"
         f"{pay_url}\n\n"
-        "Note: this command bypasses normal membership payment eligibility checks.",
+        "ℹ️ Команда обходить стандартні перевірки доступності оплати для членства.",
         parse_mode=None,
     )
 
@@ -274,14 +274,14 @@ async def start_membership_payment(
 
     if query.from_user is None:
         if query.message is not None:
-            await query.message.answer("Unable to identify user.")
+            await query.message.answer("⚠️ Не вдалося визначити користувача.")
             await remove_callback_keyboard(query)
         return
 
     if not config.payments.enabled:
         await send_tracked_action_message_from_query(
             query,
-            text="Payments are temporarily unavailable.",
+            text="⚠️ Платежі тимчасово недоступні.",
         )
         await remove_callback_keyboard(query)
         return
@@ -290,7 +290,7 @@ async def start_membership_payment(
     if application is None:
         await send_tracked_action_message_from_query(
             query,
-            text="Application not found. Please contact admin.",
+            text="⚠️ Заявку не знайдено. Зверніться до адміністратора.",
         )
         await remove_callback_keyboard(query)
         return
@@ -298,7 +298,7 @@ async def start_membership_payment(
     if not is_application_payment_eligible(application):
         await send_tracked_action_message_from_query(
             query,
-            text=f"Payment is not available for your current status: {application['status']}.",
+            text=f"⚠️ Оплата недоступна для поточного статусу: {application['status']}.",
         )
         await remove_callback_keyboard(query)
         return
@@ -313,9 +313,9 @@ async def start_membership_payment(
     await send_tracked_action_message_from_query(
         query,
         text=(
-            "Open payment page:\n"
+            "💳 Відкрийте сторінку оплати:\n"
             f"{pay_url}\n\n"
-            "After successful payment, tap \"I paid, check status\"."
+            "Після успішної оплати натисніть «✅ Я оплатив(-ла), перевірити»."
         ),
         reply_markup=payment_keyboard(),
     )
@@ -332,7 +332,7 @@ async def check_membership_payment_status(
 
     if query.from_user is None:
         if query.message is not None:
-            await query.message.answer("Unable to identify user.")
+            await query.message.answer("⚠️ Не вдалося визначити користувача.")
             await remove_callback_keyboard(query)
         return
 
@@ -340,7 +340,7 @@ async def check_membership_payment_status(
     if application is None:
         await send_tracked_action_message_from_query(
             query,
-            text="Application not found. Please contact admin.",
+            text="⚠️ Заявку не знайдено. Зверніться до адміністратора.",
         )
         await remove_callback_keyboard(query)
         return
@@ -352,7 +352,7 @@ async def check_membership_payment_status(
     if latest_payment is None:
         await send_tracked_action_message_from_query(
             query,
-            text="No payment record found yet. Tap Pay membership first.",
+            text="ℹ️ Платіж поки не знайдено. Спочатку натисніть кнопку оплати.",
             reply_markup=payment_keyboard(),
         )
         await remove_callback_keyboard(query)
@@ -362,7 +362,7 @@ async def check_membership_payment_status(
     if payment_status == "PENDING":
         await send_tracked_action_message_from_query(
             query,
-            text="Payment is still pending LiqPay callback. Please wait and check again.",
+            text="⏳ Платіж ще очікує callback від LiqPay. Зачекайте і перевірте ще раз.",
             reply_markup=payment_keyboard(),
         )
         await remove_callback_keyboard(query)
@@ -372,7 +372,7 @@ async def check_membership_payment_status(
     if status == "PAID_AWAITING_JOIN":
         await send_tracked_action_message_from_query(
             query,
-            text="Payment is confirmed. If button is missing, send /start.",
+            text="✅ Оплату підтверджено. Якщо кнопка зникла, надішліть /start.",
             reply_markup=group_access_keyboard(),
         )
         await remove_callback_keyboard(query)
@@ -385,13 +385,13 @@ async def check_membership_payment_status(
                 tg_user_id=query.from_user.id,
             )
         if query.message is not None:
-            await query.message.answer("Payment is confirmed. Membership is active.")
+            await query.message.answer("✅ Оплату підтверджено. Членство активне.")
         await remove_callback_keyboard(query)
         return
 
     await send_tracked_action_message_from_query(
         query,
-        text=f"Latest payment status: {payment_status}. Please try payment again.",
+        text=f"ℹ️ Останній статус платежу: {payment_status}. Спробуйте оплату ще раз.",
         reply_markup=payment_keyboard(),
     )
     await remove_callback_keyboard(query)

@@ -132,6 +132,15 @@ CREATE TABLE IF NOT EXISTS app_settings (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS application_votes (
+    application_id BIGINT NOT NULL REFERENCES applications(id) ON DELETE CASCADE,
+    tg_user_id BIGINT NOT NULL REFERENCES users(tg_user_id) ON DELETE CASCADE,
+    vote BOOLEAN NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (application_id, tg_user_id)
+);
+
 -- Safe schema evolution for existing databases.
 ALTER TABLE users ADD COLUMN IF NOT EXISTS member_since TIMESTAMPTZ;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS subscription_expires_at TIMESTAMPTZ;
@@ -194,3 +203,6 @@ CREATE INDEX IF NOT EXISTS idx_renewal_notifications_tg_user_id
 
 CREATE INDEX IF NOT EXISTS idx_app_settings_updated_at
     ON app_settings (updated_at);
+
+CREATE INDEX IF NOT EXISTS idx_application_votes_application_id
+    ON application_votes (application_id);

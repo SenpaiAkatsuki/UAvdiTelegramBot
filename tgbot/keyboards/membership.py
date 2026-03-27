@@ -14,17 +14,17 @@ def application_entry_keyboard(
 ) -> InlineKeyboardMarkup:
     # Main entry keyboard with website form link and optional self-bind action.
     kb = InlineKeyboardBuilder()
-    kb.button(text="Fill application on website", url=application_url)
+    kb.button(text="📝 Заповнити анкету на сайті", url=application_url)
     if self_bind_enabled:
         kb.button(
-            text="I already applied on the website",
+            text="🔗 Я вже подавав(-ла) анкету на сайті",
             callback_data="membership_site_applied",
         )
     kb.adjust(1)
     return kb.as_markup()
 
 
-def payment_keyboard(pay_button_text: str = "Pay membership") -> InlineKeyboardMarkup:
+def payment_keyboard(pay_button_text: str = "💳 Оплатити членство") -> InlineKeyboardMarkup:
     # Payment action keyboard with pay and status-check buttons.
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -36,7 +36,7 @@ def payment_keyboard(pay_button_text: str = "Pay membership") -> InlineKeyboardM
             ],
             [
                 InlineKeyboardButton(
-                    text="I paid, check status",
+                    text="✅ Я оплатив(-ла), перевірити",
                     callback_data="membership_check_payment_status",
                 )
             ],
@@ -50,7 +50,7 @@ def group_access_keyboard() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="Get group access",
+                    text="🔐 Отримати доступ до групи",
                     callback_data="membership_get_group_access",
                 )
             ]
@@ -64,7 +64,7 @@ def bind_confirmation_keyboard() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="Request bind confirmation",
+                    text="🙋 Запросити підтвердження привʼязки",
                     callback_data="membership_bind_confirmation_request",
                 )
             ]
@@ -78,7 +78,7 @@ def bind_back_keyboard() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="Back",
+                    text="⬅️ Назад",
                     callback_data="membership_bind_back",
                 )
             ],

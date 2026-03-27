@@ -356,6 +356,8 @@ class WebhookConfig:
     port: int
     weblium_path: str
     weblium_secret: str
+    signature_secret: str
+    signature_header: str
     trusted_proxy_ips: list[str]
     webhook_enabled: bool
 
@@ -371,6 +373,12 @@ class WebhookConfig:
                 "/webhooks/weblium/application",
             ),
             weblium_secret=env.str("WEBHOOK_WEBLIUM_SECRET", ""),
+            signature_secret=env.str("WEBHOOK_SIGNATURE_SECRET", "").strip(),
+            signature_header=_env_non_empty_or_default(
+                env,
+                "WEBHOOK_SIGNATURE_HEADER",
+                "X-Webhook-Signature",
+            ),
             trusted_proxy_ips=env.list(
                 "WEBHOOK_TRUSTED_PROXY_IPS",
                 subcast=str,
@@ -403,6 +411,10 @@ class WebhookConfig:
             errors.append(
                 "WEBHOOK_WEBLIUM_SECRET must not be empty when WEBHOOK_ENABLED=true"
             )
+        if self.signature_secret and not self.signature_header.strip():
+            errors.append(
+                "WEBHOOK_SIGNATURE_HEADER must not be empty when WEBHOOK_SIGNATURE_SECRET is set"
+            )
 
         for idx, value in enumerate(self.trusted_proxy_ips):
             if not value:
@@ -425,6 +437,7 @@ class VotingConfig:
     duration_seconds: int
     min_total: int | None
     require_yes_gt_no: bool
+    allow_shared_chat: bool
 
     @staticmethod
     def from_env(env: Env) -> "VotingConfig":
@@ -439,18 +452,27 @@ class VotingConfig:
             min_total = parsed if parsed > 0 else None
 
         return VotingConfig(
-            chat_id=env.int(
-                "VOTING_CHAT_ID",
-                env.int("CHAT_MEMBERSHIP_CHAT_ID", 0),
-            ),
+            chat_id=env.int("VOTING_CHAT_ID", 0),
             thread_id=thread_id,
             duration_seconds=env.int("VOTE_DURATION_SECONDS", 86400),
             min_total=min_total,
             require_yes_gt_no=env.bool("VOTE_REQUIRE_YES_GT_NO", True),
+            allow_shared_chat=env.bool("VOTING_ALLOW_SHARED_CHAT", False),
         )
 
-    def validate(self) -> None:
+    def validate(self, membership_chat_id: int) -> None:
         # Validate voting config constraints.
+        if self.chat_id == 0:
+            raise ValueError("VOTING_CHAT_ID must be configured")
+        if (
+            not self.allow_shared_chat
+            and membership_chat_id != 0
+            and self.chat_id == membership_chat_id
+        ):
+            raise ValueError(
+                "VOTING_CHAT_ID must be different from CHAT_MEMBERSHIP_CHAT_ID "
+                "(or set VOTING_ALLOW_SHARED_CHAT=true)"
+            )
         if self.duration_seconds <= 0:
             raise ValueError("VOTE_DURATION_SECONDS must be > 0")
         if self.thread_id is not None and self.thread_id <= 0:
@@ -498,18 +520,19 @@ def load_config(path: str = None) -> Config:
     liqpay = LiqPayConfig.from_env(env)
     liqpay.validate(payments_enabled=payments.enabled)
     subscription = SubscriptionConfig.from_env(env)
+    chat = ChatConfig.from_env(env)
 
     webhook = WebhookConfig.from_env(env)
     webhook.validate()
     voting = VotingConfig.from_env(env)
-    voting.validate()
+    voting.validate(membership_chat_id=chat.membership_chat_id)
 
     redis = RedisConfig.from_env(env) if tg_bot.use_redis else None
 
     return Config(
         tg_bot=tg_bot,
         db=DbConfig.from_env(env),
-        chat=ChatConfig.from_env(env),
+        chat=chat,
         payments=payments,
         throttling=throttling,
         liqpay=liqpay,

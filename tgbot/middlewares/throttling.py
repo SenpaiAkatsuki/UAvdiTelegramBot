@@ -133,8 +133,8 @@ class ThrottlingMiddleware(BaseMiddleware):
                     try:
                         await event.answer(
                             (
-                                f"Too many requests. Try again in {wait_seconds}s "
-                                f"(limit: {max_events}/{int(self._cfg.window_seconds)}s)."
+                                f"⚠️ Забагато запитів. Спробуйте знову через {wait_seconds}с "
+                                f"(ліміт: {max_events}/{int(self._cfg.window_seconds)}с)."
                             ),
                             show_alert=False,
                         )

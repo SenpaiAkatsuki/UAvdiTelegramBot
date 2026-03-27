@@ -1,0 +1,86 @@
+from decimal import Decimal
+
+from tgbot.config import (
+    ChatConfig,
+    Config,
+    DbConfig,
+    LiqPayConfig,
+    MembershipConfig,
+    PaymentsConfig,
+    SubscriptionConfig,
+    TgBot,
+    ThrottlingConfig,
+    VotingConfig,
+    WebhookConfig,
+)
+
+
+def make_test_config() -> Config:
+    return Config(
+        tg_bot=TgBot(
+            token="123456:TEST_TOKEN",
+            admin_ids=[111111111],
+            use_redis=False,
+        ),
+        db=DbConfig(
+            host="127.0.0.1",
+            port=5432,
+            user="postgres",
+            password="postgres",
+            database="bot",
+            min_pool_size=1,
+            max_pool_size=2,
+        ),
+        chat=ChatConfig(
+            membership_chat_id=-1001111111111,
+            applications_chat_id=-1002222222222,
+        ),
+        payments=PaymentsConfig(enabled=True),
+        throttling=ThrottlingConfig(
+            enabled=True,
+            window_seconds=10.0,
+            message_max_events=5,
+            command_max_events=5,
+            callback_max_events=8,
+            heavy_callback_max_events=5,
+            warning_cooldown_seconds=5.0,
+        ),
+        liqpay=LiqPayConfig(
+            public_key="sandbox_public",
+            private_key="sandbox_private",
+            currency="UAH",
+            amount=Decimal("100.00"),
+            public_base_url="https://example.com",
+            callback_path="/webhooks/liqpay/callback",
+            pay_path="/pay/liqpay/{payment_id}",
+        ),
+        subscription=SubscriptionConfig(
+            enforce_expired_removal=False,
+            enforce_expired_removal_dry_run=True,
+            enforce_expired_removal_max_per_run=25,
+        ),
+        membership=MembershipConfig(
+            application_url="https://example.com/form",
+            application_link_base_url="https://example.com/form",
+            fallback_manual_submit_enabled=True,
+            bot_username="test_bot",
+        ),
+        webhook=WebhookConfig(
+            host="0.0.0.0",
+            port=8080,
+            weblium_path="/webhooks/weblium/application",
+            weblium_secret="test_secret",
+            signature_secret="",
+            signature_header="X-Webhook-Signature",
+            trusted_proxy_ips=[],
+            webhook_enabled=True,
+        ),
+        voting=VotingConfig(
+            chat_id=-1001111111111,
+            thread_id=None,
+            duration_seconds=86400,
+            min_total=None,
+            require_yes_gt_no=True,
+        ),
+        redis=None,
+    )

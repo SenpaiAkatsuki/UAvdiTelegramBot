@@ -113,7 +113,7 @@ def _member_lines(rows: Sequence[dict], repo: PostgresRepo, start_index: int) ->
     for idx, row in enumerate(rows, start=start_index):
         days_left = repo.compute_days_left(row.get("subscription_expires_at"))
         lines.append(
-            f"{idx}. {_member_title(row)} | exp={_format_datetime(row.get('subscription_expires_at'))} | days_left={_format_days_left(days_left)}"
+            f"{idx}. {_member_title(row)} | дійсна до={_format_datetime(row.get('subscription_expires_at'))} | днів={_format_days_left(days_left)}"
         )
     return lines
 
@@ -131,10 +131,10 @@ async def _render_user_root(
         str(panel_data.get("subscription_status") or "NONE") if panel_data else "NONE"
     )
     text = (
-        "User menu\n\n"
-        f"Current status: {app_status}\n"
-        f"Subscription: {subscription_status}\n\n"
-        "Open Profile for details and actions."
+        "📋 Меню користувача\n\n"
+        f"Поточний статус: {app_status}\n"
+        f"Підписка: {subscription_status}\n\n"
+        "Відкрийте «Профіль» для деталей і дій."
     )
     return MenuScreen(text=text, reply_markup=user_root_keyboard(is_admin=is_admin))
 
@@ -148,7 +148,7 @@ async def _render_profile(
     # Render user profile details and context actions.
     panel_data = await repo.get_user_panel_data(tg_user_id=tg_user_id)
     if panel_data is None:
-        text = "Profile is not available yet. Start onboarding from /start first."
+        text = "⚠️ Профіль поки недоступний. Спочатку запустіть онбординг через /start."
         return MenuScreen(
             text=text,
             reply_markup=user_profile_keyboard(
@@ -168,12 +168,12 @@ async def _render_profile(
     show_group_access = _is_group_access_eligible(panel_data)
 
     text = (
-        "Profile\n\n"
-        f"Current status: {app_status}\n"
-        f"Subscription status: {subscription_status}\n"
-        f"Member since: {_format_datetime(member_since)}\n"
-        f"Subscription expires: {_format_datetime(expires_at)}\n"
-        f"Days left: {_format_days_left(days_left)}"
+        "👤 Профіль\n\n"
+        f"Поточний статус: {app_status}\n"
+        f"Статус підписки: {subscription_status}\n"
+        f"Учасник з: {_format_datetime(member_since)}\n"
+        f"Підписка дійсна до: {_format_datetime(expires_at)}\n"
+        f"Залишилось днів: {_format_days_left(days_left)}"
     )
     return MenuScreen(
         text=text,
@@ -188,10 +188,10 @@ async def _render_profile(
 async def _render_admin_root() -> MenuScreen:
     # Render admin root menu.
     text = (
-        "Admin menu\n\n"
-        "Choose action:\n"
-        "- Profile\n"
-        "- Management"
+        "🛠 Меню адміністратора\n\n"
+        "Оберіть дію:\n"
+        "- 👤 Профіль\n"
+        "- 🧭 Керування"
     )
     return MenuScreen(text=text, reply_markup=admin_root_keyboard())
 
@@ -199,12 +199,12 @@ async def _render_admin_root() -> MenuScreen:
 async def _render_admin_management() -> MenuScreen:
     # Render admin management menu.
     text = (
-        "Admin panel\n\n"
-        "Select a list:\n"
-        "- Active members\n"
-        "- Expiring members (<= 30 days)\n"
-        "- Expired members\n"
-        "- Subscription price (UAH)"
+        "🧭 Панель керування\n\n"
+        "Оберіть розділ:\n"
+        "- ✅ Активні учасники\n"
+        "- ⏳ Закінчуються (<= 30 днів)\n"
+        "- ❌ Прострочені\n"
+        "- 💰 Ціна підписки (грн)"
     )
     return MenuScreen(text=text, reply_markup=admin_management_keyboard())
 
@@ -223,13 +223,13 @@ async def _render_admin_subscription_price(
     current_uah = max(current_minor // 100, 1)
     default_uah = max(default_minor // 100, 1)
     text = (
-        "Subscription price\n\n"
-        f"Current: {current_uah} UAH\n"
-        f"Default from env: {default_uah} UAH\n\n"
+        "💰 Ціна підписки\n\n"
+        f"Поточна: {current_uah} грн\n"
+        f"Значення з env: {default_uah} грн\n\n"
         + (
-            "Write new price in chat now."
+            "✍️ Напишіть нову ціну в чат зараз."
             if prompt_input
-            else "Press 'Set new price' and then send amount in chat."
+            else "Натисніть «Встановити нову ціну», а потім надішліть суму в чат."
         )
     )
     return MenuScreen(
@@ -250,13 +250,13 @@ async def _render_admin_list(
     limit = PAGE_SIZE + 1
 
     if view == VIEW_ADMIN_ACTIVE:
-        title = "Active members"
+        title = "✅ Активні учасники"
         rows = await repo.list_active_members(limit=limit, offset=offset)
     elif view == VIEW_ADMIN_EXPIRING:
-        title = "Expiring members (<= 30 days)"
+        title = "⏳ Закінчуються (<= 30 днів)"
         rows = await repo.list_expiring_members(max_days=30, limit=limit, offset=offset)
     else:
-        title = "Expired members"
+        title = "❌ Прострочені"
         rows = await repo.list_expired_members(limit=limit, offset=offset)
 
     has_next = len(rows) > PAGE_SIZE
@@ -267,7 +267,7 @@ async def _render_admin_list(
         lines = _member_lines(page_rows, repo=repo, start_index=offset + 1)
         text = f"{title}\n\n" + "\n".join(lines)
     else:
-        text = f"{title}\n\nNo records on this page."
+        text = f"{title}\n\nℹ️ На цій сторінці немає записів."
 
     keyboard = admin_members_list_keyboard(
         members=page_rows,
@@ -289,18 +289,18 @@ async def _render_admin_user_detail(
     # Render single member detail card for admin.
     detail = await repo.get_member_detail(tg_user_id=target_user_id)
     if detail is None:
-        text = f"Member detail for user_id={target_user_id} not found."
+        text = f"⚠️ Дані учасника для user_id={target_user_id} не знайдено."
     else:
         days_left = repo.compute_days_left(detail.get("subscription_expires_at"))
         text = (
-            "Member detail\n\n"
-            f"User: {_member_title(detail)}\n"
+            "👤 Деталі учасника\n\n"
+            f"Користувач: {_member_title(detail)}\n"
             f"tg_user_id: {detail.get('tg_user_id')}\n"
-            f"Application status: {detail.get('application_status') or '-'}\n"
-            f"Subscription status: {detail.get('subscription_status') or '-'}\n"
-            f"Member since: {_format_datetime(detail.get('member_since'))}\n"
-            f"Subscription expires: {_format_datetime(detail.get('subscription_expires_at'))}\n"
-            f"Days left: {_format_days_left(days_left)}"
+            f"Статус заявки: {detail.get('application_status') or '-'}\n"
+            f"Статус підписки: {detail.get('subscription_status') or '-'}\n"
+            f"Учасник з: {_format_datetime(detail.get('member_since'))}\n"
+            f"Підписка дійсна до: {_format_datetime(detail.get('subscription_expires_at'))}\n"
+            f"Залишилось днів: {_format_days_left(days_left)}"
         )
 
     keyboard = admin_user_detail_keyboard(back_view=back_view, page=page)
@@ -322,7 +322,7 @@ async def render_menu_screen(
     if nav.scope == SCOPE_ADMIN:
         if not is_admin:
             return MenuScreen(
-                text="Admin panel is available only to admins.",
+                text="⛔ Адмін-панель доступна лише адміністраторам.",
                 reply_markup=admin_denied_keyboard(),
             )
 

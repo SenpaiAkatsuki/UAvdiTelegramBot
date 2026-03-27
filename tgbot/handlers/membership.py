@@ -35,6 +35,17 @@ Drives /start branching by application status and exposes bind-confirm request a
 membership_router = Router()
 
 TOKEN_TTL_HOURS = 24
+USER_START_WELCOME_TEXT = (
+    "👋 Вітаємо вас!\n"
+    "Це офіційний бот Української Асоціації Ветеринарної Візуальної Діагностики.\n\n"
+    "Тут ви зможете:\n"
+    "🔹 отримувати актуальні новини та анонси подій\n"
+    "🔹 дізнаватися про навчання, лекції та курси\n"
+    "🔹 знаходити корисні матеріали та рекомендації\n"
+    "🔹 бути частиною професійної спільноти, яка реально рухає стандарти "
+    "ветеринарної візуальної діагностики в Україні вперед\n\n"
+    "Раді бачити вас серед нас!"
+)
 
 
 def build_tokenized_url(base_url: str, token: str) -> str:
@@ -92,7 +103,7 @@ async def send_menu_entry(
     message: Message,
     *,
     is_admin: bool,
-    text: str = "You can now use the menu.",
+    text: str = "📋 Тепер ви можете користуватися меню.",
 ) -> None:
     # Send menu entry button and track message for cleanup.
     if message.from_user is not None:
@@ -168,12 +179,12 @@ async def membership_start(
     # Main /start router for membership lifecycle states.
     from_user = message.from_user
     if from_user is None:
-        await message.answer("Unable to identify user.")
+        await message.answer("⚠️ Не вдалося визначити користувача.")
         return
 
     await repo.create_or_update_user(
         tg_user_id=from_user.id,
-        full_name=from_user.full_name or "Unknown",
+        full_name=from_user.full_name or "Невідомо",
         username=from_user.username,
         language_code=from_user.language_code,
     )
@@ -206,10 +217,7 @@ async def membership_start(
         sent = await send_action_message(
             message,
             tg_user_id=from_user.id,
-            text=(
-                "Please submit your application from this button.\n"
-                "Submissions from this tokenized link are processed automatically."
-            ),
+            text=USER_START_WELCOME_TEXT,
             reply_markup=application_entry_keyboard(
                 application_url=tokenized_url,
             ),
@@ -228,8 +236,8 @@ async def membership_start(
             message,
             is_admin=is_admin,
             text=(
-                "Your application is pending review. Please wait for admin decision.\n\n"
-                "You can now use the menu."
+                "⏳ Ваша заявка на розгляді. Будь ласка, дочекайтеся рішення адміністраторів.\n\n"
+                "📋 Тепер ви можете користуватися меню."
             ),
         )
         return
@@ -239,8 +247,8 @@ async def membership_start(
             message,
             tg_user_id=from_user.id,
             text=(
-                "We found an approved website application not linked to your Telegram account.\n"
-                "Please request bind confirmation before payment."
+                "🔎 Знайдено підтверджену заявку із сайту, яка ще не привʼязана до вашого Telegram-акаунта.\n"
+                "Будь ласка, запросіть підтвердження привʼязки перед оплатою."
             ),
             reply_markup=bind_confirmation_keyboard(),
         )
@@ -251,7 +259,7 @@ async def membership_start(
         await send_action_message(
             message,
             tg_user_id=from_user.id,
-            text="Your application is approved. Complete payment to continue.",
+            text="✅ Вашу заявку підтверджено. Завершіть оплату, щоб продовжити.",
             reply_markup=payment_keyboard(),
         )
         await send_menu_entry(message, is_admin=is_admin)
@@ -264,7 +272,7 @@ async def membership_start(
                 await send_action_message(
                     message,
                     tg_user_id=from_user.id,
-                    text="Payment confirmed. Use the button below to get group access.",
+                    text="✅ Оплату підтверджено. Натисніть кнопку нижче, щоб отримати доступ до групи.",
                     reply_markup=group_access_keyboard(),
                 )
             else:
@@ -272,8 +280,8 @@ async def membership_start(
                     message,
                     is_admin=is_admin,
                     text=(
-                        "Membership is active. Group access link is no longer required.\n\n"
-                        "You can now use the menu."
+                        "✅ Членство активне. Посилання для доступу до групи більше не потрібне.\n\n"
+                        "📋 Тепер ви можете користуватися меню."
                     ),
                 )
                 return
@@ -282,10 +290,10 @@ async def membership_start(
                 message,
                 tg_user_id=from_user.id,
                 text=(
-                    "Renew required: your subscription is expired.\n"
-                    "Tap Renew membership to extend for 365 days."
+                    "⏳ Потрібно продовжити підписку: термін дії завершився.\n"
+                    "Натисніть кнопку продовження, щоб активувати ще 365 днів."
                 ),
-                reply_markup=payment_keyboard(pay_button_text="Renew membership"),
+                reply_markup=payment_keyboard(pay_button_text="💳 Продовжити підписку"),
             )
         await send_menu_entry(message, is_admin=is_admin)
         return
@@ -294,8 +302,8 @@ async def membership_start(
         message,
         is_admin=is_admin,
         text=(
-            f"Current status: {status}. Application ID: {application_id or '-'}.\n\n"
-            "You can now use the menu."
+            f"ℹ️ Поточний статус: {status}. ID заявки: {application_id or '-'}.\n\n"
+            "📋 Тепер ви можете користуватися меню."
         ),
     )
     if status not in {"NEW", "APPLICATION_REQUIRED"}:
@@ -331,4 +339,4 @@ async def membership_bind_confirmation_request(
             tg_user_id=query.from_user.id,
         )
     if query.message is not None:
-        await query.message.answer("Bind confirmation request sent to admins.")
+        await query.message.answer("✅ Запит на підтвердження привʼязки надіслано адміністраторам.")

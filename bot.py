@@ -6,18 +6,19 @@ import betterlogging as bl
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.fsm.storage.redis import RedisStorage, DefaultKeyBuilder
+from aiogram.fsm.storage.redis import DefaultKeyBuilder, RedisStorage
+from aiogram.types import ErrorEvent
 
-from tgbot.config import load_config, Config
+from tgbot.config import Config, load_config
 from tgbot.db.init import init_db, shutdown_db
 from tgbot.db.repo import PostgresRepo
 from tgbot.handlers import routers_list
 from tgbot.middlewares.config import ConfigMiddleware
 from tgbot.middlewares.db import DbMiddleware
 from tgbot.middlewares.throttling import ThrottlingMiddleware
+from tgbot.services import broadcaster
 from tgbot.services.application_voting import close_due_votes
 from tgbot.services.subscription_reminders import subscription_reminder_loop
-from tgbot.services import broadcaster
 
 """
 Bot entrypoint.
@@ -30,7 +31,47 @@ VOTE_CLOSER_INTERVAL_SECONDS = 45
 
 async def on_startup(bot: Bot, admin_ids: list[int]):
     # Send startup notification to admins.
-    await broadcaster.broadcast(bot, admin_ids, "Бот був запущений")
+    await broadcaster.broadcast(bot, admin_ids, "✅ Бота запущено.")
+
+
+async def on_error(event: ErrorEvent) -> bool:
+    # Catch unhandled update errors and respond with safe fallback text.
+    logger = logging.getLogger(__name__)
+    update_id = getattr(event.update, "update_id", None)
+    logger.exception(
+        "Unhandled bot update error. update_id=%s",
+        update_id,
+        exc_info=event.exception,
+    )
+
+    callback_query = getattr(event.update, "callback_query", None)
+    if callback_query is not None:
+        try:
+            await callback_query.answer(
+                "⚠️ Тимчасова помилка бота. Спробуйте ще раз.",
+                show_alert=True,
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug(
+                "Failed to answer callback after unhandled exception",
+                exc_info=True,
+            )
+        return True
+
+    message = getattr(event.update, "message", None)
+    if message is not None:
+        try:
+            await message.answer(
+                "⚠️ Тимчасова помилка бота. Спробуйте ще раз.",
+                parse_mode=None,
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug(
+                "Failed to notify user about unhandled message exception",
+                exc_info=True,
+            )
+
+    return True
 
 
 def register_global_middlewares(dp: Dispatcher, config: Config, db_pool=None):
@@ -114,6 +155,7 @@ async def main():
         default=DefaultBotProperties(parse_mode="HTML"),
     )
     dp = Dispatcher(storage=storage)
+    dp.errors.register(on_error)
 
     dp.include_routers(*routers_list)
 
@@ -162,4 +204,4 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
-        logging.error("Бот був вимкнений!")
+        logging.error("⛔ Бота зупинено.")

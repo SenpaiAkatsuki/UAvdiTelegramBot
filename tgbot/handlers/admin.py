@@ -42,7 +42,7 @@ async def admin_start(message: Message) -> None:
             tg_user_id=message.from_user.id,
         )
     sent = await message.reply(
-        "Admin mode. You can now use the menu.",
+        "🛠 Режим адміністратора увімкнено.\nВідкрийте меню для керування.",
         reply_markup=menu_entry_keyboard(is_admin=True),
     )
     if message.from_user is not None:
@@ -58,7 +58,7 @@ async def admin_start(message: Message) -> None:
 async def get_chat_id(message: Message) -> None:
     # Return group/supergroup chat id for env setup.
     if message.chat.type in [ChatType.GROUP, ChatType.SUPERGROUP]:
-        await message.reply(f"Chat ID: {message.chat.id}")
+        await message.reply(f"🆔 Chat ID: {message.chat.id}")
 
 
 @admin_router.message(Command("topicid"))
@@ -66,6 +66,6 @@ async def get_topic_id(message: Message) -> None:
     # Return current topic thread id in forum chats.
     thread_id = getattr(message, "message_thread_id", None)
     if thread_id is None:
-        await message.reply("No topic thread id in this message context.")
+        await message.reply("⚠️ У цьому повідомленні немає topic thread id.")
         return
-    await message.reply(f"Topic thread id: {thread_id}")
+    await message.reply(f"🧵 Topic thread id: {thread_id}")

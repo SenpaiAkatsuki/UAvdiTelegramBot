@@ -156,7 +156,7 @@ async def membership_get_group_access(
 
     if query.from_user is None:
         if query.message is not None:
-            await query.message.answer("Unable to identify user.")
+            await query.message.answer("⚠️ Не вдалося визначити користувача.")
             await remove_callback_keyboard(query)
         return
     is_admin_user = query.from_user.id in config.tg_bot.admin_ids
@@ -164,7 +164,7 @@ async def membership_get_group_access(
     membership_chat_id = config.chat.membership_chat_id
     if not membership_chat_id:
         if query.message is not None:
-            await query.message.answer("Membership group is not configured yet.")
+            await query.message.answer("⚠️ Групу членства ще не налаштовано.")
             await remove_callback_keyboard(query)
         return
 
@@ -172,7 +172,7 @@ async def membership_get_group_access(
     if application is None and not is_admin_user:
         await send_tracked_action_message(
             query,
-            text="Application not found. Please contact admin.",
+            text="⚠️ Заявку не знайдено. Зверніться до адміністратора.",
         )
         await remove_callback_keyboard(query)
         return
@@ -185,20 +185,20 @@ async def membership_get_group_access(
         if status == "ACTIVE_MEMBER":
             await send_tracked_action_message(
                 query,
-                text="Group access link was already issued for your account.",
+                text="ℹ️ Для вашого акаунта посилання доступу вже було видано.",
             )
         else:
             await send_tracked_action_message(
                 query,
-                text=f"Group access is not available for your current status: {status}.",
+                text=f"⚠️ Доступ до групи недоступний для поточного статусу: {status}.",
             )
         await remove_callback_keyboard(query)
         return
     if not is_admin_user and not is_subscription_active:
         await send_tracked_action_message(
             query,
-            text="Renew required: your subscription is expired.",
-            reply_markup=payment_keyboard(pay_button_text="Renew membership"),
+            text="⏳ Потрібно продовжити підписку: термін дії завершився.",
+            reply_markup=payment_keyboard(pay_button_text="💳 Продовжити підписку"),
         )
         await remove_callback_keyboard(query)
         return
@@ -240,7 +240,7 @@ async def membership_get_group_access(
             )
             await send_tracked_action_message(
                 query,
-                text="Unable to create group invite link right now. Please try again later.",
+                text="⚠️ Зараз не вдається створити посилання для входу в групу. Спробуйте пізніше.",
             )
             return
     except TelegramAPIError:
@@ -251,7 +251,7 @@ async def membership_get_group_access(
         )
         await send_tracked_action_message(
             query,
-            text="Unable to create group invite link right now. Please try again later.",
+            text="⚠️ Зараз не вдається створити посилання для входу в групу. Спробуйте пізніше.",
         )
         return
 
@@ -263,9 +263,9 @@ async def membership_get_group_access(
 
     if query.message is not None:
         await query.message.answer(
-            "Use this one-time link to join the private group:\n"
+            "🔐 Використайте це одноразове посилання, щоб приєднатися до приватної групи:\n"
             f"{invite.invite_link}\n\n"
-            f"This link expires in {GROUP_ACCESS_LINK_TTL_HOURS} hours and can be used only once."
+            f"⏱ Посилання дійсне {GROUP_ACCESS_LINK_TTL_HOURS} годин і працює лише один раз."
         )
     await clear_tracked_keyboard(
         bot=query.bot,
@@ -322,7 +322,7 @@ async def handle_membership_join_request(
         await safe_message_user(
             join_request,
             tg_user_id,
-            "Your join request was approved. Welcome.",
+            "✅ Ваш запит на вступ підтверджено. Ласкаво просимо!",
         )
         return
 
@@ -340,5 +340,5 @@ async def handle_membership_join_request(
     await safe_message_user(
         join_request,
         tg_user_id,
-        "Your join request was declined. Renew your membership to restore group access.",
+        "❌ Ваш запит на вступ відхилено. Продовжіть підписку, щоб відновити доступ до групи.",
     )

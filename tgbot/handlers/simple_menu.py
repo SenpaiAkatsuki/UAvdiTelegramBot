@@ -20,16 +20,16 @@ menu_router = Router()
 
 
 ORDERS = [
-    {"id": 1, "title": "Order 1", "status": "In progress"},
-    {"id": 2, "title": "Order 2", "status": "Done"},
-    {"id": 3, "title": "Order 3", "status": "Done"},
+    {"id": 1, "title": "Замовлення 1", "status": "У процесі"},
+    {"id": 2, "title": "Замовлення 2", "status": "Виконано"},
+    {"id": 3, "title": "Замовлення 3", "status": "Виконано"},
 ]
 
 
 @menu_router.message(Command("menu"))
 async def show_menu(message: Message):
     # Open simple demo menu.
-    await message.answer("Choose menu action:", reply_markup=simple_menu_keyboard())
+    await message.answer("📋 Оберіть дію в меню:", reply_markup=simple_menu_keyboard())
 
 
 @menu_router.callback_query(F.data == "create_order")
@@ -37,7 +37,7 @@ async def create_order(query: CallbackQuery):
     # Handle "create order" demo action.
     await query.answer()
     if query.message is not None:
-        await query.message.answer("You selected create order.")
+        await query.message.answer("✅ Ви обрали створення замовлення.")
 
 
 @menu_router.callback_query(F.data == "my_orders")
@@ -46,7 +46,7 @@ async def my_orders(query: CallbackQuery):
     await query.answer()
     if query.message is not None:
         await query.message.edit_text(
-            "You selected order list.",
+            "📦 Ви відкрили список замовлень.",
             reply_markup=my_orders_keyboard(ORDERS),
         )
 
@@ -61,14 +61,14 @@ async def show_order(query: CallbackQuery, callback_data: OrderCallbackData):
     order_id = callback_data.order_id
     order_info = next((order for order in ORDERS if order["id"] == order_id), None)
     if not order_info:
-        await query.message.edit_text("Order not found.")
+        await query.message.edit_text("⚠️ Замовлення не знайдено.")
         return
 
     text = as_section(
-        as_key_value("Order #", order_info["id"]),
+        as_key_value("Замовлення #", order_info["id"]),
         as_marked_list(
-            as_key_value("Title", order_info["title"]),
-            as_key_value("Status", order_info["status"]),
+            as_key_value("Назва", order_info["title"]),
+            as_key_value("Статус", order_info["status"]),
         ),
     )
     await query.message.edit_text(text.as_html(), parse_mode=ParseMode.HTML)

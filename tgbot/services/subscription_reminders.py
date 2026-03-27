@@ -44,9 +44,9 @@ def _format_expiry(expires_at: datetime | None) -> str:
 def _build_reminder_text(days_left: int, expires_at: datetime | None) -> str:
     # Build reminder text for user notification.
     return (
-        f"Your membership expires in {days_left} day(s).\n"
-        f"Expires on: {_format_expiry(expires_at)}\n\n"
-        "Renew now to keep uninterrupted group access."
+        f"⏳ Ваша підписка завершиться через {days_left} дн.\n"
+        f"Дата завершення: {_format_expiry(expires_at)}\n\n"
+        "💳 Продовжіть підписку зараз, щоб зберегти безперервний доступ до групи."
     )
 
 
@@ -94,7 +94,7 @@ async def send_due_renewal_reminders(
                 bot=bot,
                 user_id=int(tg_user_id),
                 text=_build_reminder_text(days_left=days_left, expires_at=expires_at),
-                reply_markup=payment_keyboard(pay_button_text="Renew membership"),
+                reply_markup=payment_keyboard(pay_button_text="💳 Продовжити підписку"),
                 context={
                     "event": "subscription_renewal_reminder",
                     "days_left": days_left,

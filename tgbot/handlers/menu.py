@@ -240,7 +240,7 @@ async def open_menu_command(
 ) -> None:
     # Open root inline menu for user/admin via /menu shortcut.
     if message.from_user is None:
-        await message.answer("Unable to identify user.")
+        await message.answer("⚠️ Не вдалося визначити користувача.")
         return
     await clear_tracked_keyboard(
         bot=message.bot,
@@ -256,7 +256,7 @@ async def open_menu_command(
 
     await repo.create_or_update_user(
         tg_user_id=message.from_user.id,
-        full_name=message.from_user.full_name or "Unknown",
+        full_name=message.from_user.full_name or "Невідомо",
         username=message.from_user.username,
         language_code=message.from_user.language_code,
     )
@@ -349,7 +349,7 @@ async def navigate_menu(
                 menu_message_id=query.message.message_id,
             )
         await query.answer(
-            "Send new price in UAH.",
+            "✍️ Надішліть нову ціну в грн.",
             show_alert=True,
         )
     else:

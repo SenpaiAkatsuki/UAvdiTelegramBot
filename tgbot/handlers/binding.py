@@ -169,7 +169,7 @@ def build_manual_bind_required_admin_text(
 ) -> str:
     # Build compact admin message for manual bind review cases.
     lines = [
-        "Manual bind confirmation required",
+        "⚠️ Потрібне ручне підтвердження привʼязки",
         f"tg_user_id={tg_user_id}",
         f"username={username or '-'}",
         f"phone={phone_input}",
@@ -179,7 +179,7 @@ def build_manual_bind_required_admin_text(
         lines.append(
             f"other_linked_tg_users={','.join(str(v) for v in other_linked_tg_users)}"
         )
-    lines.append("Candidates:")
+    lines.append("Кандидати:")
 
     for app in sorted(candidates, key=lambda x: x["id"], reverse=True):
         lines.append(
@@ -286,7 +286,7 @@ async def binding_entrypoint(query: CallbackQuery, state: FSMContext) -> None:
         menu_message_id=query.message.message_id,
     )
     await query.message.edit_text(
-        "Enter the phone number you used in the website form.",
+        "📱 Введіть номер телефону, який ви вказували у формі на сайті.",
         reply_markup=bind_back_keyboard(),
     )
     remember_tracked_message(
@@ -317,8 +317,8 @@ async def binding_back(
 
     await state.clear()
     edited = await query.message.edit_text(
-        "Please submit your application from this button.\n"
-        "Submissions from this tokenized link are processed automatically.",
+        "📝 Подайте анкету через кнопку нижче.\n"
+        "Заявки з цього персонального посилання обробляються автоматично.",
         reply_markup=application_entry_keyboard(application_url=tokenized_url),
     )
     remember_tracked_message(
@@ -346,7 +346,7 @@ async def binding_receive_phone(
     # Validate phone, auto-bind safely when possible, otherwise notify admins.
     from_user = message.from_user
     if from_user is None:
-        await message.answer("Unable to identify Telegram user.")
+        await message.answer("⚠️ Не вдалося визначити користувача Telegram.")
         return
 
     phone_input = (message.text or "").strip()
@@ -355,14 +355,14 @@ async def binding_receive_phone(
         await edit_menu_message(
             message=message,
             state=state,
-            text="Phone number looks invalid. Enter a valid phone number.",
+            text="⚠️ Схоже, номер телефону некоректний. Введіть правильний номер.",
             reply_markup=bind_back_keyboard(),
         )
         return
 
     await repo.create_or_update_user(
         tg_user_id=from_user.id,
-        full_name=from_user.full_name or "Unknown",
+        full_name=from_user.full_name or "Невідомо",
         username=from_user.username,
         language_code=from_user.language_code,
     )
@@ -373,8 +373,8 @@ async def binding_receive_phone(
             message=message,
             state=state,
             text=(
-                "Your Telegram account already has an active membership flow.\n"
-                "Please contact admin if you need to merge records."
+                "⚠️ Для вашого Telegram-акаунта вже є активний процес членства.\n"
+                "Зверніться до адміністратора, якщо потрібно обʼєднати записи."
             ),
         )
         return
@@ -386,8 +386,8 @@ async def binding_receive_phone(
             message=message,
             state=state,
             text=(
-                "We could not find an unlinked application by this phone.\n"
-                "Check the number and try again, or contact admin."
+                "🔎 Не вдалося знайти непривʼязану заявку за цим номером.\n"
+                "Перевірте номер і спробуйте ще раз або зверніться до адміністратора."
             ),
         )
         return
@@ -413,8 +413,8 @@ async def binding_receive_phone(
             message=message,
             state=state,
             text=(
-                "This phone is already linked to another Telegram account.\n"
-                "Admins were notified for manual verification."
+                "⚠️ Цей номер уже привʼязаний до іншого Telegram-акаунта.\n"
+                "Адміністратори отримали запит на ручну перевірку."
             ),
         )
         return
@@ -434,8 +434,8 @@ async def binding_receive_phone(
             message=message,
             state=state,
             text=(
-                "We found multiple possible applications.\n"
-                "Admins were notified to confirm binding manually."
+                "⚠️ Знайдено кілька можливих заявок.\n"
+                "Адміністратори отримали запит для ручного підтвердження привʼязки."
             ),
         )
         return
@@ -451,7 +451,7 @@ async def binding_receive_phone(
         await edit_menu_message(
             message=message,
             state=state,
-            text="This application cannot be bound automatically. Please contact admin.",
+            text="⚠️ Цю заявку не можна привʼязати автоматично. Зверніться до адміністратора.",
         )
         return
 
@@ -467,8 +467,8 @@ async def binding_receive_phone(
             message=message,
             state=state,
             text=(
-                "Binding failed because the application was already updated.\n"
-                "Please contact admin for manual confirmation."
+                "⚠️ Привʼязку не виконано: заявку вже було оновлено.\n"
+                "Зверніться до адміністратора для ручного підтвердження."
             ),
         )
         return
@@ -480,8 +480,8 @@ async def binding_receive_phone(
             message=message,
             state=state,
             text=(
-                "Your previous site application was linked successfully and is approved.\n"
-                "You can proceed to payment now."
+                "✅ Вашу попередню заявку із сайту успішно привʼязано та підтверджено.\n"
+                "Можна переходити до оплати."
             ),
             reply_markup=payment_keyboard(),
         )
@@ -490,8 +490,8 @@ async def binding_receive_phone(
             message=message,
             state=state,
             text=(
-                "Your previous site application was linked successfully.\n"
-                "Current status: under review."
+                "✅ Вашу попередню заявку із сайту успішно привʼязано.\n"
+                "Поточний статус: на розгляді."
             ),
         )
 
@@ -499,7 +499,7 @@ async def binding_receive_phone(
         bot=message.bot,
         admin_ids=config.tg_bot.admin_ids,
         text=(
-            "Application bound to Telegram user\n"
+            "✅ Заявку привʼязано до Telegram-користувача\n"
             f"application_id={bound.get('id')}\n"
             f"tg_user_id={from_user.id}\n"
             f"status={bound.get('status')}"

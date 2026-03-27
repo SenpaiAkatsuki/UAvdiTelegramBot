@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      run_smoke_tests:
+        description: "Run optional smoke tests"
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    env:
+      RUN_WEBLIUM_SMOKE_TESTS: ${{ github.event.inputs.run_smoke_tests == 'true' && '1' || '0' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Compile source
+        run: |
+          python -m compileall bot.py tgbot infrastructure
+
+      - name: Run tests
+        run: |
+          pytest

@@ -15,7 +15,7 @@ user_router = Router()
 async def user_start(message: Message):
     # Minimal runtime check message with chat/user ids.
     await message.reply(
-        "Welcome! Bot is running.\n"
+        "✅ Бот працює.\n"
         f"chat_id={message.chat.id}\n"
         f"user_id={message.from_user.id}"
     )

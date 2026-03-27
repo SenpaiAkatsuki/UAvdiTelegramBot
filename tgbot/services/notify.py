@@ -89,7 +89,7 @@ async def notify_admins_matched_application(
     return await notify_admins(
         bot=bot,
         admin_ids=admin_ids,
-        text=_build_admin_message("Matched application received", application),
+        text=_build_admin_message("✅ Отримано привʼязану заявку", application),
         context={"event": "matched_application"},
     )
 
@@ -103,7 +103,7 @@ async def notify_admins_unlinked_application(
     return await notify_admins(
         bot=bot,
         admin_ids=admin_ids,
-        text=_build_admin_message("Unlinked application received", application),
+        text=_build_admin_message("📥 Отримано непривʼязану заявку", application),
         context={"event": "unlinked_application"},
     )
 
@@ -117,7 +117,7 @@ async def notify_admins_bind_confirmation_request(
     return await notify_admins(
         bot=bot,
         admin_ids=admin_ids,
-        text=_build_admin_message("Bind confirmation request", bind_request),
+        text=_build_admin_message("🙋 Запит на підтвердження привʼязки", bind_request),
         context={"event": "bind_confirmation_request"},
     )
 
@@ -131,7 +131,7 @@ async def notify_admins_approval(
     return await notify_admins(
         bot=bot,
         admin_ids=admin_ids,
-        text=_build_admin_message("Application approved", application),
+        text=_build_admin_message("✅ Заявку підтверджено", application),
         context={"event": "application_approved"},
     )
 
@@ -145,7 +145,7 @@ async def notify_admins_rejection(
     return await notify_admins(
         bot=bot,
         admin_ids=admin_ids,
-        text=_build_admin_message("Application rejected", application),
+        text=_build_admin_message("❌ Заявку відхилено", application),
         context={"event": "application_rejected"},
     )
 
@@ -159,6 +159,6 @@ async def notify_admins_payment_ready(
     return await notify_admins(
         bot=bot,
         admin_ids=admin_ids,
-        text=_build_admin_message("Payment-ready notification", application),
+        text=_build_admin_message("💳 Заявка готова до оплати", application),
         context={"event": "payment_ready"},
     )
