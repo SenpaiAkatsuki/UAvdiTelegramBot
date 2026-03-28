@@ -1,86 +1,120 @@
 # UAvdi Telegram Bot
 
-Telegram bot project with:
+Telegram bot for closed membership management:
+application intake, admin moderation, payment, subscription lifecycle, and private group access.
 
-- `aiogram v3` (polling mode),
-- `asyncpg` + PostgreSQL (no ORM),
-- `aiohttp` webhook app for Weblium and LiqPay callbacks.
+## Product Overview
 
-## What This Bot Does
+This project is built for organizations that need a controlled member onboarding flow in Telegram.
 
-This bot automates a closed membership flow:
+Core idea:
+1. A person submits an application (from site or bot entry link).
+2. Admins review and vote on that application in Telegram.
+3. Approved person pays yearly subscription through LiqPay.
+4. Bot confirms callback, activates subscription, and gives group access.
+5. Bot sends renewal reminders and can enforce expired-access rules.
 
-1. A person submits an application from site or bot link.
-2. Admins review and vote in a separate admin Telegram group.
-3. Approved users pay yearly subscription through LiqPay.
-4. After successful callback verification, subscription is activated.
-5. User gets access to the shared/private member Telegram group.
+## Who Uses It
 
-It also includes:
+- Applicant/User: applies, pays, renews, gets group access.
+- Admin: reviews and votes applications, sees member lists, edits subscription price.
+- Operator/Dev: runs bot + webhook + database, configures env and deployment.
 
-- renewal reminders before expiry,
-- admin inline panel for member monitoring,
-- runtime subscription price control from admin menu.
+## What Users and Admins See
 
-## Stack
+- User side:
+  - `/start` entry flow
+  - one-message inline menu
+  - profile with subscription status and days left
+  - pay/renew actions and group access action
 
-- Bot runtime: `bot.py`
-- Webhook runtime: `python -m infrastructure.api.weblium_app`
-- Database schema: `tgbot/db/schema.sql` (applied automatically on startup)
+- Admin side:
+  - inline admin panel (active/expiring/expired lists)
+  - inline vote buttons for applications
+  - runtime subscription price update from menu
 
-## Requirements
+## Main Functional Blocks
+
+- Weblium webhook intake (linked and unlinked applications)
+- Bind/self-bind flow by contact data
+- Admin voting flow with idempotent state transitions
+- LiqPay checkout page + callback signature verification
+- 365-day subscriptions with 20/10/5-day reminders
+- Group join gating by subscription state
+- Optional expired-user removal job
+- Anti-spam throttling middleware
+
+## Architecture (High Level)
+
+- Bot runtime: `bot.py` (`aiogram` polling)
+- Webhook runtime: `python -m infrastructure.api.weblium_app` (`aiohttp`)
+- Data layer: `asyncpg` + PostgreSQL (`tgbot/db/repo.py`, no ORM)
+- Schema: `tgbot/db/schema.sql` (auto-applied on startup)
+
+## Technical Setup
+
+### Requirements
 
 - Python 3.11+
 - PostgreSQL 14+
-- Telegram bot token and admin user IDs
+- Telegram bot token
+- LiqPay keys (if payments enabled)
+- Public webhook base URL (for site + LiqPay callbacks)
 
-## Local run (without Docker)
+### Environment
 
-1. Rename `.env.dist` to `.env` and fill required values.
-2. Configure DB connection in `.env`:
-   - `DB_HOST`
-   - `DB_PORT`
-   - `DB_USER`
-   - `DB_PASSWORD`
-   - `DB_NAME`
-3. Make sure PostgreSQL is running and the database from `DB_NAME` exists.
-4. Install dependencies:
+1. Rename `.env.dist` to `.env`.
+2. Fill all required values.
+3. Minimum critical variables to verify:
+   - `BOT_TOKEN`
+   - `ADMINS`
+   - DB settings: `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`, `DB_NAME`
+   - `CHAT_MEMBERSHIP_CHAT_ID` (member group)
+   - `VOTING_CHAT_ID` (admin voting group)
+   - `WEBHOOK_ENABLED`, `WEBHOOK_WEBLIUM_SECRET`
+   - `PAYMENTS_ENABLED` and `LIQPAY_*` values (if payment flow enabled)
+
+Note:
+- Recommended mode is separate chats for voting and membership.
+- One-chat legacy mode is possible only with `VOTING_ALLOW_SHARED_CHAT=true`.
+
+### Run Locally (without Docker)
+
+1. Install deps:
    - `pip install -r requirements.txt`
-5. Start webhook app:
+2. Ensure PostgreSQL is running and DB exists.
+3. Start webhook app:
    - `python -m infrastructure.api.weblium_app`
-6. Start bot:
+4. Start bot:
    - `python bot.py`
 
-## Docker Compose run
+### Run with Docker Compose
 
-Current compose stack includes:
-
+Compose services:
 - `bot`
 - `weblium_app`
 - `pg_database`
-- `adminer` (bound to `127.0.0.1:8081`)
+- `adminer` (`127.0.0.1:8081`)
 
-Run:
-
+Start:
 - `docker compose up --build`
 
-## Tests and CI
+## Testing and CI
 
-- Local unit tests:
+- Install test deps:
   - `pip install -r requirements.txt -r requirements-dev.txt`
+- Run tests:
   - `pytest`
 - Optional smoke tests:
   - PowerShell: `$env:RUN_WEBLIUM_SMOKE_TESTS=1; pytest`
   - Bash: `RUN_WEBLIUM_SMOKE_TESTS=1 pytest`
-- GitHub Actions workflow:
-  - `.github/workflows/ci.yml` runs compile check + tests on push/PR.
-  - Smoke tests can be enabled manually in `workflow_dispatch`.
+- CI workflow:
+  - `.github/workflows/ci.yml` runs compile + tests on push/PR
 
-## Notes
+## Implementation Notes
 
-- Project does not use SQLAlchemy or Alembic.
-- Payments are handled by LiqPay checkout + callback verification.
-- Subscription and admin menu logic are in `tgbot/handlers` and `tgbot/services`.
-- Weblium webhook supports optional HMAC signature validation (`WEBHOOK_SIGNATURE_SECRET` + `WEBHOOK_SIGNATURE_HEADER`).
-- Voting chat is configured by `VOTING_CHAT_ID` and should be different from `CHAT_MEMBERSHIP_CHAT_ID`.
-- Legacy one-chat mode is possible only with `VOTING_ALLOW_SHARED_CHAT=true`.
+- No SQLAlchemy, no Alembic.
+- DB is source of truth for statuses/panels.
+- Payments are LiqPay checkout + verified server callback.
+- Weblium webhook supports optional signature validation:
+  `WEBHOOK_SIGNATURE_SECRET`, `WEBHOOK_SIGNATURE_HEADER`.
