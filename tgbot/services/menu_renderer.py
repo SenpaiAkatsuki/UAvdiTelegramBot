@@ -41,6 +41,23 @@ Builds text and inline keyboard for each user/admin menu screen.
 PAGE_SIZE = 8
 GROUP_ACCESS_ELIGIBLE_STATUSES = {"PAID_AWAITING_JOIN"}
 
+APPLICATION_STATUS_LABELS = {
+    "NEW": "Початкова реєстрація",
+    "APPLICATION_REQUIRED": "Потрібно подати заявку",
+    "APPLICATION_PENDING": "Заявка на розгляді",
+    "UNLINKED_APPLICATION_PENDING": "Заявка з сайту очікує підтвердження",
+    "UNLINKED_APPLICATION_APPROVED": "Контент заявки схвалено, очікується прив'язка",
+    "APPROVED_AWAITING_PAYMENT": "Заявку схвалено, очікується оплата",
+    "PAID_AWAITING_JOIN": "Оплату підтверджено, можна отримати доступ до групи",
+    "ACTIVE_MEMBER": "Членство активне",
+    "REJECTED": "Заявку відхилено",
+}
+
+SUBSCRIPTION_STATUS_LABELS = {
+    "ACTIVE": "Активна",
+    "NONE": "Не активована",
+}
+
 
 @dataclass
 class MenuScreen:
@@ -66,11 +83,77 @@ def _format_datetime(value: datetime | None) -> str:
     return dt.strftime("%Y-%m-%d %H:%M UTC")
 
 
-def _format_days_left(days_left: int | None) -> str:
-    # Render days-left value with fallback.
+def _format_days_left_human(days_left: int | None) -> str:
+    # Render subscription days-left in user-friendly way.
     if days_left is None:
-        return "-"
-    return str(days_left)
+        return "немає активної підписки"
+    if days_left < 0:
+        return f"прострочено на {abs(days_left)} дн."
+    if days_left == 0:
+        return "останній день дії"
+    return f"{days_left} дн."
+
+
+def _application_status_label(status: str | None) -> str:
+    # Convert internal application status code to readable text.
+    normalized = str(status or "NEW").strip().upper()
+    return APPLICATION_STATUS_LABELS.get(normalized, "Статус уточнюється")
+
+
+def _subscription_status_label(status: str | None) -> str:
+    # Convert internal subscription status code to readable text.
+    normalized = str(status or "NONE").strip().upper()
+    return SUBSCRIPTION_STATUS_LABELS.get(normalized, "Статус уточнюється")
+
+
+def _next_step_hint(
+    *,
+    app_status: str,
+    subscription_status: str,
+    show_group_access: bool,
+) -> str:
+    # Build short "what next" hint for profile screen.
+    if show_group_access:
+        return "натисніть «Отримати доступ до групи»"
+    if app_status == "APPLICATION_PENDING":
+        return "очікуйте рішення адміністраторів"
+    if app_status == "APPROVED_AWAITING_PAYMENT":
+        return "натисніть «Продовжити підписку» та завершіть оплату"
+    if app_status == "REJECTED":
+        return "зверніться до адміністраторів за деталями"
+    if subscription_status == "ACTIVE":
+        return "профіль активний, додаткових дій не потрібно"
+    return "відкрийте /start для перевірки наступного кроку"
+
+
+def _admin_next_step_hint(
+    *,
+    app_status: str,
+    subscription_status: str,
+    days_left: int | None,
+) -> str:
+    # Build short admin-facing action hint for member detail.
+    if app_status in {"APPLICATION_PENDING", "UNLINKED_APPLICATION_PENDING"}:
+        return "очікується рішення голосування адміністраторів"
+    if app_status == "UNLINKED_APPLICATION_APPROVED":
+        return "очікується прив'язка заявки до Telegram-користувача"
+    if app_status == "APPROVED_AWAITING_PAYMENT":
+        return "очікується оплата підписки"
+    if app_status == "PAID_AWAITING_JOIN":
+        return "очікується вхід учасника до групи"
+    if app_status == "REJECTED":
+        return "заявку завершено зі статусом «Відхилено»"
+
+    if subscription_status == "ACTIVE":
+        if days_left is None:
+            return "перевірте дату завершення підписки"
+        if days_left < 0:
+            return "підписка прострочена, потрібне продовження"
+        if days_left <= 20:
+            return "бажано нагадати учаснику про продовження"
+        return "додаткових дій не потрібно"
+
+    return "перевірте стан заявки та оплати"
 
 
 def _is_subscription_active(panel_data: dict | None) -> bool:
@@ -112,8 +195,9 @@ def _member_lines(rows: Sequence[dict], repo: PostgresRepo, start_index: int) ->
     lines: list[str] = []
     for idx, row in enumerate(rows, start=start_index):
         days_left = repo.compute_days_left(row.get("subscription_expires_at"))
+        sub_status = _subscription_status_label(row.get("subscription_status"))
         lines.append(
-            f"{idx}. {_member_title(row)} | дійсна до={_format_datetime(row.get('subscription_expires_at'))} | днів={_format_days_left(days_left)}"
+            f"{idx}. {_member_title(row)} — {sub_status}, до {_format_datetime(row.get('subscription_expires_at'))} ({_format_days_left_human(days_left)})"
         )
     return lines
 
@@ -130,11 +214,14 @@ async def _render_user_root(
     subscription_status = (
         str(panel_data.get("subscription_status") or "NONE") if panel_data else "NONE"
     )
+    app_label = _application_status_label(app_status)
+    subscription_label = _subscription_status_label(subscription_status)
+
     text = (
-        "📋 Меню користувача\n\n"
-        f"Поточний статус: {app_status}\n"
-        f"Підписка: {subscription_status}\n\n"
-        "Відкрийте «Профіль» для деталей і дій."
+        "📋 Ваше меню\n\n"
+        f"Статус заявки: {app_label}\n"
+        f"Підписка: {subscription_label}\n\n"
+        "Відкрийте «Профіль», щоб побачити деталі та наступний крок."
     )
     return MenuScreen(text=text, reply_markup=user_root_keyboard(is_admin=is_admin))
 
@@ -148,7 +235,7 @@ async def _render_profile(
     # Render user profile details and context actions.
     panel_data = await repo.get_user_panel_data(tg_user_id=tg_user_id)
     if panel_data is None:
-        text = "⚠️ Профіль поки недоступний. Спочатку запустіть онбординг через /start."
+        text = "⚠️ Профіль тимчасово недоступний. Спробуйте запустити /start ще раз."
         return MenuScreen(
             text=text,
             reply_markup=user_profile_keyboard(
@@ -166,14 +253,20 @@ async def _render_profile(
 
     show_renew = days_left is not None and days_left <= 20
     show_group_access = _is_group_access_eligible(panel_data)
+    next_step = _next_step_hint(
+        app_status=app_status,
+        subscription_status=subscription_status,
+        show_group_access=show_group_access,
+    )
 
     text = (
-        "👤 Профіль\n\n"
-        f"Поточний статус: {app_status}\n"
-        f"Статус підписки: {subscription_status}\n"
+        "👤 Ваш профіль\n\n"
+        f"Статус заявки: {_application_status_label(app_status)}\n"
+        f"Підписка: {_subscription_status_label(subscription_status)}\n"
         f"Учасник з: {_format_datetime(member_since)}\n"
-        f"Підписка дійсна до: {_format_datetime(expires_at)}\n"
-        f"Залишилось днів: {_format_days_left(days_left)}"
+        f"Діє до: {_format_datetime(expires_at)}\n"
+        f"Залишилось: {_format_days_left_human(days_left)}\n\n"
+        f"Що далі: {next_step}."
     )
     return MenuScreen(
         text=text,
@@ -188,8 +281,8 @@ async def _render_profile(
 async def _render_admin_root() -> MenuScreen:
     # Render admin root menu.
     text = (
-        "🛠 Меню адміністратора\n\n"
-        "Оберіть дію:\n"
+        "🛠 Адмін-меню\n\n"
+        "Оберіть потрібний розділ:\n"
         "- 👤 Профіль\n"
         "- 🧭 Керування"
     )
@@ -200,7 +293,7 @@ async def _render_admin_management() -> MenuScreen:
     # Render admin management menu.
     text = (
         "🧭 Панель керування\n\n"
-        "Оберіть розділ:\n"
+        "Робота з учасниками та підписками:\n"
         "- ✅ Активні учасники\n"
         "- ⏳ Закінчуються (<= 30 днів)\n"
         "- ❌ Прострочені\n"
@@ -224,12 +317,12 @@ async def _render_admin_subscription_price(
     default_uah = max(default_minor // 100, 1)
     text = (
         "💰 Ціна підписки\n\n"
-        f"Поточна: {current_uah} грн\n"
-        f"Значення з env: {default_uah} грн\n\n"
+        f"Поточна ціна: {current_uah} грн\n"
+        f"Базова (із конфігу): {default_uah} грн\n\n"
         + (
-            "✍️ Напишіть нову ціну в чат зараз."
+            "✍️ Надішліть нову ціну одним числом у чат."
             if prompt_input
-            else "Натисніть «Встановити нову ціну», а потім надішліть суму в чат."
+            else "Натисніть «Встановити нову ціну», після цього надішліть суму в чат."
         )
     )
     return MenuScreen(
@@ -289,18 +382,26 @@ async def _render_admin_user_detail(
     # Render single member detail card for admin.
     detail = await repo.get_member_detail(tg_user_id=target_user_id)
     if detail is None:
-        text = f"⚠️ Дані учасника для user_id={target_user_id} не знайдено."
+        text = f"⚠️ Дані учасника з ID {target_user_id} не знайдено."
     else:
         days_left = repo.compute_days_left(detail.get("subscription_expires_at"))
+        app_status = str(detail.get("application_status") or "NEW")
+        subscription_status = str(detail.get("subscription_status") or "NONE")
+        next_step = _admin_next_step_hint(
+            app_status=app_status,
+            subscription_status=subscription_status,
+            days_left=days_left,
+        )
         text = (
-            "👤 Деталі учасника\n\n"
+            "👤 Профіль учасника\n\n"
             f"Користувач: {_member_title(detail)}\n"
-            f"tg_user_id: {detail.get('tg_user_id')}\n"
-            f"Статус заявки: {detail.get('application_status') or '-'}\n"
-            f"Статус підписки: {detail.get('subscription_status') or '-'}\n"
+            f"ID: {detail.get('tg_user_id')}\n"
+            f"Статус заявки: {_application_status_label(app_status)}\n"
+            f"Підписка: {_subscription_status_label(subscription_status)}\n"
             f"Учасник з: {_format_datetime(detail.get('member_since'))}\n"
-            f"Підписка дійсна до: {_format_datetime(detail.get('subscription_expires_at'))}\n"
-            f"Залишилось днів: {_format_days_left(days_left)}"
+            f"Діє до: {_format_datetime(detail.get('subscription_expires_at'))}\n"
+            f"Залишок: {_format_days_left_human(days_left)}\n\n"
+            f"Що далі: {next_step}."
         )
 
     keyboard = admin_user_detail_keyboard(back_view=back_view, page=page)
