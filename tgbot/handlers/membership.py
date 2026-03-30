@@ -68,24 +68,6 @@ def build_tokenized_url(base_url: str, token: str) -> str:
     )
 
 
-async def load_current_status(repo: PostgresRepo, tg_user_id: int) -> tuple[str, int | None]:
-    # Read latest application status and id for current user.
-    async with repo.pool.acquire() as conn:
-        row = await conn.fetchrow(
-            """
-            SELECT id, status
-            FROM applications
-            WHERE tg_user_id = $1
-            ORDER BY created_at DESC
-            LIMIT 1;
-            """,
-            tg_user_id,
-        )
-        if row is None:
-            return "NEW", None
-        return row["status"], row["id"]
-
-
 def has_active_subscription(user_row: dict[str, Any] | None) -> bool:
     # Subscription is active only when status is ACTIVE and expiry is in future.
     if not user_row:
@@ -205,7 +187,13 @@ async def membership_start(
     )
     is_admin = from_user.id in config.tg_bot.admin_ids
 
-    status, application_id = await load_current_status(repo, from_user.id)
+    panel_data = await repo.get_user_panel_data(tg_user_id=from_user.id)
+    status = str(panel_data.get("application_status") or "NEW") if panel_data else "NEW"
+    application_id = (
+        int(panel_data["application_id"])
+        if panel_data and panel_data.get("application_id") is not None
+        else None
+    )
 
     if status in {"NEW", "APPLICATION_REQUIRED"}:
         token = await get_or_create_active_application_token(repo, from_user.id)
@@ -266,8 +254,7 @@ async def membership_start(
         return
 
     if status in {"PAID_AWAITING_JOIN", "ACTIVE_MEMBER"}:
-        user_row = await repo.get_user_by_tg_user_id(from_user.id)
-        if has_active_subscription(user_row):
+        if has_active_subscription(panel_data):
             if status == "PAID_AWAITING_JOIN":
                 await send_action_message(
                     message,

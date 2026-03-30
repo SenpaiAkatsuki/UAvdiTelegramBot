@@ -15,7 +15,7 @@
 ## Config added
 
 - `VOTING_CHAT_ID`
-- `VOTING_THREAD_ID` (optional forum topic id)
+- `VOTING_TOPIC_ID` (optional forum topic id)
 - `VOTE_DURATION_SECONDS` (default `86400`)
 - `VOTE_MIN_TOTAL` (optional quorum)
 - `VOTE_REQUIRE_YES_GT_NO` (default `True`)
