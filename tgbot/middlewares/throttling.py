@@ -85,6 +85,18 @@ class ThrottlingMiddleware(BaseMiddleware):
             return "heavy_callback", self._cfg.heavy_callback_max_events
         return "callback", self._cfg.callback_max_events
 
+    @staticmethod
+    def _is_admin_user(data: dict[str, Any], user_id: int) -> bool:
+        # Skip throttling for configured admins.
+        config = data.get("config")
+        if config is None:
+            return False
+        try:
+            admin_ids = config.tg_bot.admin_ids
+        except Exception:  # noqa: BLE001
+            return False
+        return user_id in admin_ids
+
     async def __call__(
         self,
         handler: Callable[[Any, dict[str, Any]], Awaitable[Any]],
@@ -98,6 +110,8 @@ class ThrottlingMiddleware(BaseMiddleware):
         if isinstance(event, Message):
             from_user = event.from_user
             if from_user is None:
+                return await handler(event, data)
+            if self._is_admin_user(data, from_user.id):
                 return await handler(event, data)
             bucket, max_events = self._classify_message(event)
             if max_events > 0:
@@ -120,6 +134,8 @@ class ThrottlingMiddleware(BaseMiddleware):
         if isinstance(event, CallbackQuery):
             from_user = event.from_user
             if from_user is None:
+                return await handler(event, data)
+            if self._is_admin_user(data, from_user.id):
                 return await handler(event, data)
             bucket, max_events = self._classify_callback(event)
             if max_events > 0:
