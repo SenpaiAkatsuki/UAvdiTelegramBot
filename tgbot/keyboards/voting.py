@@ -23,14 +23,14 @@ def application_vote_keyboard(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text=f"✅ Approve ({yes_count})",
+                    text=f"✅ Yes ({yes_count})",
                     callback_data=ApplicationVoteCallbackData(
                         application_id=application_id,
                         decision=VOTE_DECISION_APPROVE,
                     ).pack(),
                 ),
                 InlineKeyboardButton(
-                    text=f"❌ Reject ({no_count})",
+                    text=f"❌ No ({no_count})",
                     callback_data=ApplicationVoteCallbackData(
                         application_id=application_id,
                         decision=VOTE_DECISION_REJECT,
