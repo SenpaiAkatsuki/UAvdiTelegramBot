@@ -81,12 +81,38 @@ services:
       POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres}
     volumes:
       - pgdata:/var/lib/postgresql/data
+      - pgbackups:/backups:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB} -h 127.0.0.1 -p 5432"]
       interval: 5s
       timeout: 5s
       retries: 20
       start_period: 5s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "200k"
+        max-file: "10"
+
+  pg_backup:
+    image: postgres:16-alpine
+    restart: always
+    depends_on:
+      pg_database:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: ${DB_PASSWORD:-postgres}
+      POSTGRES_HOST: pg_database
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${DB_NAME:-bot}
+      POSTGRES_USER: ${DB_USER:-postgres}
+      BACKUP_DIR: /backups
+      BACKUP_INTERVAL_SECONDS: ${BACKUP_INTERVAL_SECONDS:-86400}
+      BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-14}
+    volumes:
+      - ./scripts/postgres:/scripts:ro
+      - pgbackups:/backups
+    command: ["/bin/sh", "/scripts/backup_loop.sh"]
     logging:
       driver: "json-file"
       options:
@@ -116,3 +142,4 @@ services:
 
 volumes:
   pgdata: {}
+  pgbackups: {}

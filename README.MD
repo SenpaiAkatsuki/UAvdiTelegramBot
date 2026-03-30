@@ -94,10 +94,28 @@ Compose services:
 - `bot`
 - `weblium_app`
 - `pg_database`
+- `pg_backup` (automatic compressed Postgres dumps)
 - `adminer` (`127.0.0.1:8081`)
 
 Start:
-- `docker compose up --build`
+- `docker compose up -d --build`
+
+### Automatic DB Backups (Compose)
+
+- Backups run automatically in `pg_backup` service.
+- Dump format: compressed custom dump (`pg_dump -Fc -Z6`).
+- Controlled by env:
+  - `BACKUP_INTERVAL_SECONDS` (default `86400`)
+  - `BACKUP_RETENTION_DAYS` (default `14`)
+
+Check backup logs:
+- `docker compose logs -f pg_backup`
+
+List backup files inside backup volume:
+- `docker compose exec pg_backup sh -lc "ls -lah /backups"`
+
+Restore from a dump file:
+- `docker compose exec -T pg_database sh -lc "pg_restore -U $POSTGRES_USER -d $POSTGRES_DB --clean --if-exists /backups/<dump_file>.dump"`
 
 ## Testing and CI
 
