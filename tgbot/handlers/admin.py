@@ -63,9 +63,9 @@ async def get_chat_id(message: Message) -> None:
 
 @admin_router.message(Command("topicid"))
 async def get_topic_id(message: Message) -> None:
-    # Return current topic thread id in forum chats.
+    # Return current topic id in forum chats.
     thread_id = getattr(message, "message_thread_id", None)
     if thread_id is None:
-        await message.reply("No topic thread id in this message context.")
+        await message.reply("No topic id in this message context.")
         return
-    await message.reply(f"Topic thread id: {thread_id}")
+    await message.reply(f"Topic id: {thread_id}")

@@ -429,8 +429,11 @@ class VotingConfig:
 
     @staticmethod
     def from_env(env: Env) -> "VotingConfig":
-        # Parse voting chat/thread thresholds and duration.
-        thread_raw = env.str("VOTING_THREAD_ID", "").strip()
+        # Parse voting chat/topic thresholds and duration.
+        thread_raw = env.str("VOTING_TOPIC_ID", "").strip()
+        if not thread_raw:
+            # Backward compatibility with previous key name.
+            thread_raw = env.str("VOTING_THREAD_ID", "").strip()
         thread_id: int | None = int(thread_raw) if thread_raw else None
 
         min_total_raw = env.str("VOTE_MIN_TOTAL", "").strip()
@@ -464,7 +467,7 @@ class VotingConfig:
         if self.duration_seconds <= 0:
             raise ValueError("VOTE_DURATION_SECONDS must be > 0")
         if self.thread_id is not None and self.thread_id <= 0:
-            raise ValueError("VOTING_THREAD_ID must be > 0 when set")
+            raise ValueError("VOTING_TOPIC_ID (or legacy VOTING_THREAD_ID) must be > 0 when set")
 
 
 @dataclass

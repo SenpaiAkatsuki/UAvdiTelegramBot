@@ -41,43 +41,6 @@ JOIN_APPROVAL_ELIGIBLE_STATUSES = {
 GROUP_ACCESS_LINK_TTL_HOURS = 72
 
 
-async def get_latest_application_for_user(
-    repo: PostgresRepo,
-    tg_user_id: int,
-) -> dict | None:
-    # Load latest application row for a Telegram user.
-    async with repo.pool.acquire() as conn:
-        row = await conn.fetchrow(
-            """
-            SELECT *
-            FROM applications
-            WHERE tg_user_id = $1
-            ORDER BY created_at DESC
-            LIMIT 1;
-            """,
-            tg_user_id,
-        )
-    return dict(row) if row else None
-
-
-async def get_user_subscription_state(
-    repo: PostgresRepo,
-    tg_user_id: int,
-) -> dict | None:
-    # Load current subscription state from users table.
-    async with repo.pool.acquire() as conn:
-        row = await conn.fetchrow(
-            """
-            SELECT subscription_status, subscription_expires_at
-            FROM users
-            WHERE tg_user_id = $1
-            LIMIT 1;
-            """,
-            tg_user_id,
-        )
-    return dict(row) if row else None
-
-
 def has_active_subscription(user_row: dict | None) -> bool:
     # Check ACTIVE status with non-expired subscription date.
     if not user_row:
@@ -168,8 +131,15 @@ async def membership_get_group_access(
             await remove_callback_keyboard(query)
         return
 
-    application = await get_latest_application_for_user(repo, query.from_user.id)
-    if application is None and not is_admin_user:
+    panel_data = await repo.get_user_panel_data(tg_user_id=query.from_user.id)
+    status = str(panel_data.get("application_status") or "") if panel_data else ""
+    application_id = (
+        int(panel_data["application_id"])
+        if panel_data and panel_data.get("application_id") is not None
+        else None
+    )
+
+    if not status and not is_admin_user:
         await send_tracked_action_message(
             query,
             text="Application not found. Please contact admin.",
@@ -177,9 +147,7 @@ async def membership_get_group_access(
         await remove_callback_keyboard(query)
         return
 
-    status = application["status"] if application else None
-    subscription_row = await get_user_subscription_state(repo, query.from_user.id)
-    is_subscription_active = has_active_subscription(subscription_row)
+    is_subscription_active = has_active_subscription(panel_data)
 
     if not is_admin_user and status not in ELIGIBLE_GROUP_ACCESS_STATUSES:
         if status == "ACTIVE_MEMBER":
@@ -255,9 +223,9 @@ async def membership_get_group_access(
         )
         return
 
-    if status == "PAID_AWAITING_JOIN" and application is not None:
+    if status == "PAID_AWAITING_JOIN" and application_id is not None:
         await repo.update_application_status(
-            application_id=int(application["id"]),
+            application_id=application_id,
             status="ACTIVE_MEMBER",
         )
 
@@ -289,10 +257,14 @@ async def handle_membership_join_request(
     tg_user_id = join_request.from_user.id
     is_admin_user = tg_user_id in config.tg_bot.admin_ids
 
-    application = await get_latest_application_for_user(repo, tg_user_id)
-    status = application["status"] if application else None
-    subscription_row = await get_user_subscription_state(repo, tg_user_id)
-    is_subscription_active = has_active_subscription(subscription_row)
+    panel_data = await repo.get_user_panel_data(tg_user_id=tg_user_id)
+    status = str(panel_data.get("application_status") or "") if panel_data else ""
+    application_id = (
+        int(panel_data["application_id"])
+        if panel_data and panel_data.get("application_id") is not None
+        else None
+    )
+    is_subscription_active = has_active_subscription(panel_data)
 
     if is_admin_user or (status in JOIN_APPROVAL_ELIGIBLE_STATUSES and is_subscription_active):
         try:
@@ -313,9 +285,9 @@ async def handle_membership_join_request(
             logger.exception("Telegram error while approving join request. user_id=%s", tg_user_id)
             return
 
-        if application and status == "PAID_AWAITING_JOIN":
+        if application_id is not None and status == "PAID_AWAITING_JOIN":
             await repo.update_application_status(
-                application_id=int(application["id"]),
+                application_id=application_id,
                 status="ACTIVE_MEMBER",
             )
 
