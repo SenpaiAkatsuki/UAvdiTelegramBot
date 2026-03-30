@@ -10,18 +10,23 @@ from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
 from tgbot.config import Config
 from tgbot.db.repo import PostgresRepo
 from tgbot.keyboards.membership import payment_keyboard
+from tgbot.keyboards.voting import application_vote_keyboard
 from tgbot.services.notify import notify_user
 
 """
 Application voting service.
 
-Starts group polls for applications and finalizes results after vote timeout.
+Starts one-message inline voting for applications and finalizes results after timeout.
 """
 
 logger = logging.getLogger(__name__)
 
 VOTE_STATUS_OPEN = "OPEN"
 VOTE_STATUS_PROCESSED = "PROCESSED"
+VOTE_CAST_OK = "OK"
+VOTE_CAST_NOT_FOUND = "NOT_FOUND"
+VOTE_CAST_CLOSED = "CLOSED"
+VOTE_CAST_EXPIRED = "EXPIRED"
 
 
 def utcnow() -> datetime:
@@ -35,7 +40,7 @@ def calc_vote_result(
     min_total: int | None,
     require_yes_gt_no: bool,
 ) -> bool:
-    # Calculate approval decision from poll counts and thresholds.
+    # Calculate approval decision from vote counts and thresholds.
     total = yes_count + no_count
     if min_total is not None and total < min_total:
         return False
@@ -48,18 +53,31 @@ def build_application_vote_text(
     application: dict[str, Any],
     branch: str,
 ) -> str:
-    # Build human-readable poll context text for group.
+    # Build human-readable vote context text for group.
+    branch_label = {
+        "matched": "from bot",
+        "unlinked": "from site (no Telegram link)",
+    }.get(branch, branch)
     return (
-        f"Application review request ({branch})\n"
-        f"application_id={application.get('id')}\n"
-        f"tg_user_id={application.get('tg_user_id') or '-'}\n"
-        f"name={application.get('applicant_name') or '-'}\n"
-        f"phone={application.get('contact_phone') or '-'}\n"
-        f"email={application.get('contact_email') or '-'}\n"
-        f"specialization={application.get('specialization') or '-'}\n"
-        f"document={application.get('document_file_name') or '-'}\n"
-        "Vote in the poll below."
+        f"🗳 New application for review ({branch_label})\n\n"
+        f"📄 Application ID #{application.get('id')}\n"
+        f"👤 Name: {application.get('applicant_name') or '-'}\n"
+        f"📞 Phone: {application.get('contact_phone') or '-'}\n"
+        f"✉️ Email: {application.get('contact_email') or '-'}\n"
+        f"🩺 Specialization: {application.get('specialization') or '-'}\n"
+        f"📎 Document: {application.get('document_file_name') or '-'}\n\n"
+        "Choose a decision using buttons below."
     )
+
+
+def _is_vote_expired(vote_closes_at: datetime | None) -> bool:
+    # Check whether voting deadline has already passed.
+    if not isinstance(vote_closes_at, datetime):
+        return False
+    closes_at = vote_closes_at
+    if closes_at.tzinfo is None:
+        closes_at = closes_at.replace(tzinfo=timezone.utc)
+    return closes_at <= utcnow()
 
 
 async def start_vote(
@@ -69,7 +87,7 @@ async def start_vote(
     config: Config,
     repo: PostgresRepo,
 ) -> dict[str, Any]:
-    # Create poll for application and save vote metadata in DB.
+    # Create one-message inline vote and persist vote metadata.
     if not config.voting.chat_id:
         raise RuntimeError("VOTING_CHAT_ID is not configured.")
 
@@ -85,47 +103,159 @@ async def start_vote(
     if config.voting.thread_id is not None:
         send_kwargs["message_thread_id"] = config.voting.thread_id
 
-    summary = await bot.send_message(
+    vote_message = await bot.send_message(
         chat_id=config.voting.chat_id,
         text=application_text,
-        **send_kwargs,
-    )
-    poll_message = await bot.send_poll(
-        chat_id=config.voting.chat_id,
-        question=f"Approve application #{application_id}?",
-        options=["Approve", "Reject"],
-        is_anonymous=False,
-        allows_multiple_answers=False,
-        reply_to_message_id=summary.message_id,
+        reply_markup=application_vote_keyboard(
+            application_id=application_id,
+            yes_count=0,
+            no_count=0,
+        ),
+        parse_mode=None,
         **send_kwargs,
     )
 
     async with repo.pool.acquire() as conn:
-        row = await conn.fetchrow(
-            """
-            UPDATE applications
-            SET
-                vote_chat_id = $2,
-                vote_message_id = $3,
-                vote_poll_id = $4,
-                vote_status = $5,
-                vote_closes_at = $6,
-                vote_yes_count = NULL,
-                vote_no_count = NULL,
-                updated_at = NOW()
-            WHERE id = $1
-            RETURNING *;
-            """,
-            application_id,
-            int(poll_message.chat.id),
-            int(poll_message.message_id),
-            poll_message.poll.id if poll_message.poll else None,
-            VOTE_STATUS_OPEN,
-            vote_closes_at,
-        )
+        async with conn.transaction():
+            await conn.execute(
+                "DELETE FROM application_votes WHERE application_id = $1;",
+                application_id,
+            )
+            row = await conn.fetchrow(
+                """
+                UPDATE applications
+                SET
+                    vote_chat_id = $2,
+                    vote_message_id = $3,
+                    vote_poll_id = NULL,
+                    vote_status = $4,
+                    vote_closes_at = $5,
+                    vote_yes_count = 0,
+                    vote_no_count = 0,
+                    updated_at = NOW()
+                WHERE id = $1
+                RETURNING *;
+                """,
+                application_id,
+                int(vote_message.chat.id),
+                int(vote_message.message_id),
+                VOTE_STATUS_OPEN,
+                vote_closes_at,
+            )
+
     if row is None:
         raise ValueError(f"application {application_id} not found during vote start")
     return dict(row)
+
+
+async def cast_admin_vote(
+    repo: PostgresRepo,
+    *,
+    application_id: int,
+    tg_user_id: int,
+    approve: bool,
+) -> tuple[str, dict[str, Any] | None]:
+    # Insert or update admin vote and refresh aggregate counters.
+    async with repo.pool.acquire() as conn:
+        async with conn.transaction():
+            locked = await conn.fetchrow(
+                "SELECT * FROM applications WHERE id = $1 FOR UPDATE;",
+                application_id,
+            )
+            if locked is None:
+                return VOTE_CAST_NOT_FOUND, None
+
+            if locked.get("vote_status") != VOTE_STATUS_OPEN:
+                return VOTE_CAST_CLOSED, dict(locked)
+
+            if _is_vote_expired(locked.get("vote_closes_at")):
+                return VOTE_CAST_EXPIRED, dict(locked)
+
+            await conn.execute(
+                """
+                INSERT INTO application_votes (application_id, tg_user_id, vote, created_at, updated_at)
+                VALUES ($1, $2, $3, NOW(), NOW())
+                ON CONFLICT (application_id, tg_user_id) DO UPDATE
+                SET
+                    vote = EXCLUDED.vote,
+                    updated_at = NOW();
+                """,
+                application_id,
+                tg_user_id,
+                approve,
+            )
+
+            counts = await conn.fetchrow(
+                """
+                SELECT
+                    COALESCE(SUM(CASE WHEN vote IS TRUE THEN 1 ELSE 0 END), 0)::INT AS yes_count,
+                    COALESCE(SUM(CASE WHEN vote IS FALSE THEN 1 ELSE 0 END), 0)::INT AS no_count
+                FROM application_votes
+                WHERE application_id = $1;
+                """,
+                application_id,
+            )
+            yes_count = int(counts["yes_count"]) if counts is not None else 0
+            no_count = int(counts["no_count"]) if counts is not None else 0
+
+            updated = await conn.fetchrow(
+                """
+                UPDATE applications
+                SET
+                    vote_yes_count = $2,
+                    vote_no_count = $3,
+                    updated_at = NOW()
+                WHERE id = $1
+                RETURNING *;
+                """,
+                application_id,
+                yes_count,
+                no_count,
+            )
+            return VOTE_CAST_OK, dict(updated) if updated is not None else None
+
+
+async def refresh_vote_message_markup(
+    bot: Bot,
+    *,
+    application_row: dict[str, Any],
+) -> None:
+    # Refresh inline vote keyboard with current counters.
+    chat_id = application_row.get("vote_chat_id")
+    message_id = application_row.get("vote_message_id")
+    application_id = application_row.get("id")
+    if chat_id is None or message_id is None or application_id is None:
+        return
+
+    yes_count = int(application_row.get("vote_yes_count") or 0)
+    no_count = int(application_row.get("vote_no_count") or 0)
+
+    try:
+        await bot.edit_message_reply_markup(
+            chat_id=int(chat_id),
+            message_id=int(message_id),
+            reply_markup=application_vote_keyboard(
+                application_id=int(application_id),
+                yes_count=yes_count,
+                no_count=no_count,
+            ),
+        )
+    except TelegramBadRequest as exc:
+        message = (exc.message or "").lower()
+        if "message is not modified" in message:
+            return
+        if "message to edit not found" in message:
+            return
+        logger.warning(
+            "Failed to refresh vote keyboard. application_id=%s error=%s",
+            application_id,
+            exc.message,
+        )
+    except TelegramAPIError:
+        logger.exception(
+            "Telegram API error while refreshing vote keyboard. application_id=%s",
+            application_id,
+        )
 
 
 async def notify_vote_result_user(
@@ -145,7 +275,7 @@ async def notify_vote_result_user(
                 bot=bot,
                 user_id=tg_user_id,
                 text=(
-                    "Your application was approved by the community vote.\n"
+                    "✅ Your application has been approved by community vote.\n"
                     "You can now proceed to payment."
                 ),
                 reply_markup=payment_keyboard(),
@@ -158,7 +288,7 @@ async def notify_vote_result_user(
         await notify_user(
             bot=bot,
             user_id=tg_user_id,
-            text="Your application content is approved and still pending next steps.",
+            text="✅ Your application content is approved. Please wait for the next step.",
             context={
                 "event": "vote_application_content_approved",
                 "application_id": application_id,
@@ -170,8 +300,8 @@ async def notify_vote_result_user(
         bot=bot,
         user_id=tg_user_id,
         text=(
-            "Your application was rejected by the community vote.\n"
-            "You can contact admins for details."
+            "❌ Your application was rejected by community vote.\n"
+            "Contact admins for details."
         ),
         context={
             "event": "vote_application_rejected",
@@ -180,16 +310,121 @@ async def notify_vote_result_user(
     )
 
 
+def _resolve_final_status(current_status: str, approved: bool) -> str:
+    # Resolve final application status from current status and vote decision.
+    if approved:
+        if current_status == "APPLICATION_PENDING":
+            return "APPROVED_AWAITING_PAYMENT"
+        if current_status == "UNLINKED_APPLICATION_PENDING":
+            return "UNLINKED_APPLICATION_APPROVED"
+        return current_status
+
+    if current_status in {"APPLICATION_PENDING", "UNLINKED_APPLICATION_PENDING"}:
+        return "REJECTED"
+    return current_status
+
+
+async def _finalize_vote_application(
+    bot: Bot,
+    config: Config,
+    repo: PostgresRepo,
+    *,
+    application_id: int,
+) -> bool:
+    # Finalize one open application vote and notify applicant.
+    approved: bool
+    updated_row: dict[str, Any] | None = None
+
+    async with repo.pool.acquire() as conn:
+        async with conn.transaction():
+            locked = await conn.fetchrow(
+                "SELECT * FROM applications WHERE id = $1 FOR UPDATE;",
+                application_id,
+            )
+            if locked is None or locked["vote_status"] != VOTE_STATUS_OPEN:
+                return False
+
+            current_status = str(locked["status"])
+            yes_count = int(locked.get("vote_yes_count") or 0)
+            no_count = int(locked.get("vote_no_count") or 0)
+            approved = calc_vote_result(
+                yes_count=yes_count,
+                no_count=no_count,
+                min_total=config.voting.min_total,
+                require_yes_gt_no=config.voting.require_yes_gt_no,
+            )
+            new_status = _resolve_final_status(current_status=current_status, approved=approved)
+
+            updated = await conn.fetchrow(
+                """
+                UPDATE applications
+                SET
+                    status = $2,
+                    approved_at = CASE
+                        WHEN $2 IN ('APPROVED_AWAITING_PAYMENT', 'UNLINKED_APPLICATION_APPROVED')
+                            THEN COALESCE(approved_at, NOW())
+                        ELSE approved_at
+                    END,
+                    rejected_at = CASE
+                        WHEN $2 = 'REJECTED'
+                            THEN COALESCE(rejected_at, NOW())
+                        ELSE rejected_at
+                    END,
+                    vote_status = $3,
+                    updated_at = NOW()
+                WHERE id = $1
+                RETURNING *;
+                """,
+                application_id,
+                new_status,
+                VOTE_STATUS_PROCESSED,
+            )
+            updated_row = dict(updated) if updated is not None else None
+
+    if updated_row is None:
+        return False
+
+    chat_id = updated_row.get("vote_chat_id")
+    message_id = updated_row.get("vote_message_id")
+    if chat_id is not None and message_id is not None:
+        try:
+            await bot.edit_message_reply_markup(
+                chat_id=int(chat_id),
+                message_id=int(message_id),
+                reply_markup=None,
+            )
+        except TelegramBadRequest as exc:
+            message = (exc.message or "").lower()
+            if "message is not modified" not in message and "message to edit not found" not in message:
+                logger.warning(
+                    "Failed to remove closed vote keyboard. application_id=%s error=%s",
+                    application_id,
+                    exc.message,
+                )
+        except TelegramAPIError:
+            logger.exception(
+                "Telegram API error while removing closed vote keyboard. application_id=%s",
+                application_id,
+            )
+
+    await notify_vote_result_user(
+        bot=bot,
+        application_row=updated_row,
+        approved=approved,
+    )
+    return True
+
+
 async def close_due_votes(
     bot: Bot,
     config: Config,
     repo: PostgresRepo,
 ) -> int:
-    # Stop due polls, update application status, and notify users.
+    # Finalize all due inline votes, remove keyboards, and notify users.
     async with repo.pool.acquire() as conn:
         due_rows = await conn.fetch(
             """
-            SELECT *
+            SELECT id
             FROM applications
             WHERE vote_status = 'OPEN'
               AND vote_closes_at IS NOT NULL
@@ -203,103 +438,13 @@ async def close_due_votes(
 
     processed = 0
     for row in due_rows:
-        app = dict(row)
-        app_id = int(app["id"])
-        chat_id = int(app["vote_chat_id"])
-        message_id = int(app["vote_message_id"])
-
-        try:
-            poll = await bot.stop_poll(chat_id=chat_id, message_id=message_id)
-        except TelegramBadRequest as exc:
-            message = (exc.message or "").lower()
-            if "poll has already been closed" in message:
-                logger.info(
-                    "Vote poll already closed by Telegram/admin. application_id=%s",
-                    app_id,
-                )
-                continue
-            if "message to edit not found" in message:
-                logger.warning(
-                    "Vote poll message missing. application_id=%s chat_id=%s message_id=%s",
-                    app_id,
-                    chat_id,
-                    message_id,
-                )
-                continue
-            logger.warning("Failed to stop poll for application_id=%s: %s", app_id, exc.message)
-            continue
-        except TelegramAPIError:
-            logger.exception("Telegram API error while stopping poll. application_id=%s", app_id)
-            continue
-
-        options = poll.options if poll else []
-        yes_count = int(options[0].voter_count) if len(options) > 0 else 0
-        no_count = int(options[1].voter_count) if len(options) > 1 else 0
-        approved = calc_vote_result(
-            yes_count=yes_count,
-            no_count=no_count,
-            min_total=config.voting.min_total,
-            require_yes_gt_no=config.voting.require_yes_gt_no,
-        )
-
-        async with repo.pool.acquire() as conn:
-            async with conn.transaction():
-                locked = await conn.fetchrow(
-                    "SELECT * FROM applications WHERE id = $1 FOR UPDATE;",
-                    app_id,
-                )
-                if locked is None or locked["vote_status"] != VOTE_STATUS_OPEN:
-                    continue
-
-                current_status = str(locked["status"])
-                if approved:
-                    if current_status == "APPLICATION_PENDING":
-                        new_status = "APPROVED_AWAITING_PAYMENT"
-                    elif current_status == "UNLINKED_APPLICATION_PENDING":
-                        new_status = "UNLINKED_APPLICATION_APPROVED"
-                    else:
-                        new_status = current_status
-                else:
-                    if current_status in {"APPLICATION_PENDING", "UNLINKED_APPLICATION_PENDING"}:
-                        new_status = "REJECTED"
-                    else:
-                        new_status = current_status
-
-                updated = await conn.fetchrow(
-                    """
-                    UPDATE applications
-                    SET
-                        status = $2,
-                        approved_at = CASE
-                            WHEN $2 IN ('APPROVED_AWAITING_PAYMENT', 'UNLINKED_APPLICATION_APPROVED')
-                                THEN COALESCE(approved_at, NOW())
-                            ELSE approved_at
-                        END,
-                        rejected_at = CASE
-                            WHEN $2 = 'REJECTED'
-                                THEN COALESCE(rejected_at, NOW())
-                            ELSE rejected_at
-                        END,
-                        vote_status = $3,
-                        vote_yes_count = $4,
-                        vote_no_count = $5,
-                        updated_at = NOW()
-                    WHERE id = $1
-                    RETURNING *;
-                    """,
-                    app_id,
-                    new_status,
-                    VOTE_STATUS_PROCESSED,
-                    yes_count,
-                    no_count,
-                )
-
-        if updated is not None:
+        app_id = int(row["id"])
+        if await _finalize_vote_application(
+            bot=bot,
+            config=config,
+            repo=repo,
+            application_id=app_id,
+        ):
             processed += 1
-            await notify_vote_result_user(
-                bot=bot,
-                application_row=dict(updated),
-                approved=approved,
-            )
 
     return processed

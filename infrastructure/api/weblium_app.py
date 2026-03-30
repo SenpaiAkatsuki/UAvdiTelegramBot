@@ -345,7 +345,7 @@ def _build_unlinked_vote_text(
 ) -> str:
     return (
         build_application_vote_text(dict(application), branch="unlinked")
-        + f"\nbind_token={bind_token}"
+        + f"\n\n🔗 Bind token: {bind_token}"
     )
 
 
