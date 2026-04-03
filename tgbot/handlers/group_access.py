@@ -33,6 +33,7 @@ group_access_router = Router()
 
 ELIGIBLE_GROUP_ACCESS_STATUSES = {
     "PAID_AWAITING_JOIN",
+    "ACTIVE_MEMBER",
 }
 JOIN_APPROVAL_ELIGIBLE_STATUSES = {
     "PAID_AWAITING_JOIN",
@@ -222,12 +223,6 @@ async def membership_get_group_access(
             text="Unable to create group invite link right now. Please try again later.",
         )
         return
-
-    if status == "PAID_AWAITING_JOIN" and application_id is not None:
-        await repo.update_application_status(
-            application_id=application_id,
-            status="ACTIVE_MEMBER",
-        )
 
     if query.message is not None:
         await query.message.answer(

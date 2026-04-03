@@ -16,6 +16,7 @@ from tgbot.services.application_voting import (
     VOTE_CAST_OK,
     cast_admin_vote,
     close_due_votes,
+    finalize_vote_if_target_reached,
     refresh_vote_message_markup,
 )
 
@@ -80,6 +81,16 @@ async def handle_application_vote_callback(
         return
 
     if cast_status == VOTE_CAST_OK and application_row is not None:
+        finalized = await finalize_vote_if_target_reached(
+            bot=query.bot,
+            config=config,
+            repo=repo,
+            application_row=application_row,
+        )
+        if finalized:
+            await query.answer("Ваш голос зараховано. Рішення прийнято.")
+            return
+
         await refresh_vote_message_markup(
             bot=query.bot,
             application_row=application_row,

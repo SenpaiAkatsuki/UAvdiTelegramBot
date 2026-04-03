@@ -4,18 +4,19 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Sequence
 
-from aiogram.types import InlineKeyboardMarkup
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from tgbot.callbacks.menu import (
     MenuCallbackData,
     SCOPE_ADMIN,
     VIEW_ADMIN_ACTIVE,
     VIEW_ADMIN_EXPIRED,
-    VIEW_ADMIN_EXPIRING,
     VIEW_ADMIN_MANAGEMENT,
+    VIEW_ADMIN_PENDING,
     VIEW_ADMIN_ROOT,
     VIEW_ADMIN_SUBSCRIPTION_PRICE,
     VIEW_ADMIN_USER_DETAIL,
+    VIEW_ADMIN_VOTING_SETTINGS,
     VIEW_PROFILE,
     VIEW_USER_ROOT,
 )
@@ -28,6 +29,7 @@ from tgbot.keyboards.menu import (
     admin_root_keyboard,
     admin_subscription_price_keyboard,
     admin_user_detail_keyboard,
+    admin_voting_settings_keyboard,
     user_profile_keyboard,
     user_root_keyboard,
 )
@@ -134,7 +136,7 @@ def _admin_next_step_hint(
 ) -> str:
     # Build short admin-facing action hint for member detail.
     if app_status in {"APPLICATION_PENDING", "UNLINKED_APPLICATION_PENDING"}:
-        return "очікується рішення голосування адміністраторів"
+        return "очікується рішення адміністраторів"
     if app_status == "UNLINKED_APPLICATION_APPROVED":
         return "очікується прив'язка заявки до Telegram-користувача"
     if app_status == "APPROVED_AWAITING_PAYMENT":
@@ -200,6 +202,23 @@ def _member_lines(rows: Sequence[dict], repo: PostgresRepo, start_index: int) ->
             f"{idx}. {_member_title(row)} — {sub_status}, до {_format_datetime(row.get('subscription_expires_at'))} ({_format_days_left_human(days_left)})"
         )
     return lines
+
+
+def _back_only_keyboard(*, view: str) -> InlineKeyboardMarkup:
+    # Generic single-back keyboard for input modes.
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="⬅️ Назад",
+                    callback_data=MenuCallbackData(
+                        scope=SCOPE_ADMIN,
+                        view=view,
+                    ).pack(),
+                )
+            ]
+        ]
+    )
 
 
 async def _render_user_root(
@@ -289,17 +308,37 @@ async def _render_admin_root() -> MenuScreen:
     return MenuScreen(text=text, reply_markup=admin_root_keyboard())
 
 
-async def _render_admin_management() -> MenuScreen:
+async def _render_admin_management(
+    *,
+    repo: PostgresRepo,
+    config: Config,
+) -> MenuScreen:
     # Render admin management menu.
+    vote_target = await repo.get_vote_min_total(
+        default_target=(
+            int(config.voting.min_total)
+            if config.voting.min_total is not None and int(config.voting.min_total) > 0
+            else 1
+        )
+    )
+    vote_duration_seconds = await repo.get_vote_duration_seconds(
+        default_seconds=int(config.voting.duration_seconds)
+    )
+
     text = (
         "🧭 Панель керування\n\n"
         "Робота з учасниками та підписками:\n"
+        "- 🕒 Очікують схвалення\n"
         "- ✅ Активні учасники\n"
-        "- ⏳ Закінчуються (<= 30 днів)\n"
-        "- ❌ Прострочені\n"
-        "- 💰 Ціна підписки (грн)"
+        "- ❌ Прострочені\n\n"
+        "Голосування:\n"
+        f"- Ціль голосів (за/проти): {vote_target}\n"
+        f"- Тривалість опиту: {vote_duration_seconds} сек."
     )
-    return MenuScreen(text=text, reply_markup=admin_management_keyboard())
+    return MenuScreen(
+        text=text,
+        reply_markup=admin_management_keyboard(),
+    )
 
 
 async def _render_admin_subscription_price(
@@ -325,10 +364,52 @@ async def _render_admin_subscription_price(
             else "Натисніть «Встановити нову ціну», після цього надішліть суму в чат."
         )
     )
+    if prompt_input:
+        reply_markup = _back_only_keyboard(view=VIEW_ADMIN_SUBSCRIPTION_PRICE)
+    else:
+        reply_markup = admin_subscription_price_keyboard()
+
     return MenuScreen(
         text=text,
-        reply_markup=admin_subscription_price_keyboard(),
+        reply_markup=reply_markup,
     )
+
+
+async def _render_admin_voting_settings(
+    *,
+    repo: PostgresRepo,
+    config: Config,
+    prompt_mode: str = "",
+) -> MenuScreen:
+    # Render voting setup screen (target votes and vote duration).
+    vote_target = await repo.get_vote_min_total(
+        default_target=(
+            int(config.voting.min_total)
+            if config.voting.min_total is not None and int(config.voting.min_total) > 0
+            else 1
+        )
+    )
+    vote_duration_seconds = await repo.get_vote_duration_seconds(
+        default_seconds=int(config.voting.duration_seconds)
+    )
+
+    prompt_hint = "Налаштуйте значення кнопками нижче."
+    if prompt_mode == "target":
+        prompt_hint = "✍️ Надішліть нову ціль голосів одним числом у чат."
+    elif prompt_mode == "duration":
+        prompt_hint = "✍️ Надішліть нову тривалість опиту в секундах (0 = без таймера)."
+
+    text = (
+        "🗳 Налаштування голосування\n\n"
+        f"Поточна ціль голосів (за/проти): {vote_target}\n"
+        f"Поточна тривалість опиту: {vote_duration_seconds} сек.\n\n"
+        f"{prompt_hint}"
+    )
+    if prompt_mode:
+        reply_markup = _back_only_keyboard(view=VIEW_ADMIN_VOTING_SETTINGS)
+    else:
+        reply_markup = admin_voting_settings_keyboard()
+    return MenuScreen(text=text, reply_markup=reply_markup)
 
 
 async def _render_admin_list(
@@ -345,9 +426,9 @@ async def _render_admin_list(
     if view == VIEW_ADMIN_ACTIVE:
         title = "✅ Активні учасники"
         rows = await repo.list_active_members(limit=limit, offset=offset)
-    elif view == VIEW_ADMIN_EXPIRING:
-        title = "⏳ Закінчуються (<= 30 днів)"
-        rows = await repo.list_expiring_members(max_days=30, limit=limit, offset=offset)
+    elif view == VIEW_ADMIN_PENDING:
+        title = "🕒 Очікують схвалення"
+        rows = await repo.list_pending_approval_members(limit=limit, offset=offset)
     else:
         title = "❌ Прострочені"
         rows = await repo.list_expired_members(limit=limit, offset=offset)
@@ -404,7 +485,19 @@ async def _render_admin_user_detail(
             f"Що далі: {next_step}."
         )
 
-    keyboard = admin_user_detail_keyboard(back_view=back_view, page=page)
+    show_approve = False
+    if detail is not None:
+        show_approve = str(detail.get("application_status") or "") in {
+            "APPLICATION_PENDING",
+            "UNLINKED_APPLICATION_PENDING",
+        }
+
+    keyboard = admin_user_detail_keyboard(
+        back_view=back_view,
+        page=page,
+        target_user_id=target_user_id,
+        show_approve=show_approve,
+    )
     return MenuScreen(text=text, reply_markup=keyboard)
 
 
@@ -430,16 +523,28 @@ async def render_menu_screen(
         if nav.view == VIEW_ADMIN_ROOT:
             return await _render_admin_root()
         if nav.view == VIEW_ADMIN_MANAGEMENT:
-            return await _render_admin_management()
+            return await _render_admin_management(repo=repo, config=config)
         if nav.view == VIEW_ADMIN_SUBSCRIPTION_PRICE:
             return await _render_admin_subscription_price(
                 repo=repo,
                 config=config,
                 prompt_input=str(nav.back_view or "").strip().lower() == "custom",
             )
+        if nav.view == VIEW_ADMIN_VOTING_SETTINGS:
+            mode_raw = str(nav.back_view or "").strip().lower()
+            prompt_mode = ""
+            if mode_raw == "custom_target":
+                prompt_mode = "target"
+            elif mode_raw == "custom_duration":
+                prompt_mode = "duration"
+            return await _render_admin_voting_settings(
+                repo=repo,
+                config=config,
+                prompt_mode=prompt_mode,
+            )
         if nav.view == VIEW_PROFILE:
             return await _render_profile(repo=repo, tg_user_id=tg_user_id, is_admin=True)
-        if nav.view in {VIEW_ADMIN_ACTIVE, VIEW_ADMIN_EXPIRING, VIEW_ADMIN_EXPIRED}:
+        if nav.view in {VIEW_ADMIN_PENDING, VIEW_ADMIN_ACTIVE, VIEW_ADMIN_EXPIRED}:
             return await _render_admin_list(repo=repo, view=nav.view, page=nav.page)
         if nav.view == VIEW_ADMIN_USER_DETAIL:
             return await _render_admin_user_detail(

@@ -383,6 +383,41 @@ async def _remove_token_entry_keyboard(
         )
 
 
+async def _remove_user_entry_keyboards(
+    bot: Bot,
+    repo: PostgresRepo,
+    tg_user_id: int,
+    primary_token_record: Mapping[str, Any] | None = None,
+) -> None:
+    # Remove current and recent token-entry keyboards for this user.
+    records: list[Mapping[str, Any]] = []
+    if primary_token_record:
+        records.append(primary_token_record)
+
+    recent_records = await repo.list_application_token_records_for_user(
+        tg_user_id=tg_user_id,
+        limit=20,
+    )
+    records.extend(recent_records)
+
+    seen_targets: set[tuple[int, int]] = set()
+    for record in records:
+        metadata_raw = record.get("metadata") if isinstance(record, Mapping) else None
+        metadata: Mapping[str, Any] = metadata_raw if isinstance(metadata_raw, Mapping) else {}
+        chat_id = metadata.get("entry_chat_id")
+        message_id = metadata.get("entry_message_id")
+        if chat_id is None or message_id is None:
+            continue
+        try:
+            target = (int(chat_id), int(message_id))
+        except (TypeError, ValueError):
+            continue
+        if target in seen_targets:
+            continue
+        seen_targets.add(target)
+        await _remove_token_entry_keyboard(bot=bot, token_record=record)
+
+
 async def weblium_application_webhook(request: web.Request) -> web.Response:
     config: Config = request.app["config"]
     repo: PostgresRepo = request.app["repo"]
@@ -459,7 +494,18 @@ async def weblium_application_webhook(request: web.Request) -> web.Response:
         token = _as_string(normalized.get("tg_token"))
         token_record = await repo.get_token_record(token) if token else None
 
-        if token and _is_token_record_valid(token_record):
+        if token:
+            if not _is_token_record_valid(token_record):
+                return web.json_response(
+                    {
+                        "ok": False,
+                        "message": "invalid/expired/reused tg_token ignored",
+                        "branch": "token_invalid",
+                        "request_hash": request_hash,
+                    },
+                    status=200,
+                )
+
             try:
                 tg_user_id = int(token_record["tg_user_id"])
                 matched_application = await repo.create_matched_application_from_webhook(
@@ -470,8 +516,17 @@ async def weblium_application_webhook(request: web.Request) -> web.Response:
                 )
             except ValueError:
                 logger.info(
-                    "Token became invalid during processing, fallback to unlinked flow. token=%s",
+                    "Token became invalid during processing, ignoring tokenized webhook. token=%s",
                     token,
+                )
+                return web.json_response(
+                    {
+                        "ok": False,
+                        "message": "invalid/expired/reused tg_token ignored",
+                        "branch": "token_invalid",
+                        "request_hash": request_hash,
+                    },
+                    status=200,
                 )
             else:
                 await notify_user(
@@ -485,7 +540,12 @@ async def weblium_application_webhook(request: web.Request) -> web.Response:
                         "application_id": matched_application.get("id"),
                     },
                 )
-                await _remove_token_entry_keyboard(bot=bot, token_record=token_record)
+                await _remove_user_entry_keyboards(
+                    bot=bot,
+                    repo=repo,
+                    tg_user_id=tg_user_id,
+                    primary_token_record=token_record,
+                )
                 await start_vote(
                     application_id=int(matched_application["id"]),
                     application_text=build_application_vote_text(

@@ -40,13 +40,50 @@ def calc_vote_result(
     min_total: int | None,
     require_yes_gt_no: bool,
 ) -> bool:
-    # Calculate approval decision from vote counts and thresholds.
-    total = yes_count + no_count
-    if min_total is not None and total < min_total:
+    # Calculate approval decision using per-option target votes.
+    target_votes = _target_total_votes(min_total)
+    yes_reached = yes_count >= target_votes
+    no_reached = no_count >= target_votes
+
+    if yes_reached and not no_reached:
+        return True
+    if no_reached and not yes_reached:
         return False
-    if require_yes_gt_no:
-        return yes_count > no_count
-    return yes_count >= no_count
+    if yes_reached and no_reached:
+        if require_yes_gt_no:
+            return yes_count > no_count
+        return yes_count >= no_count
+
+    # Target not reached for either option.
+    return False
+
+
+def _target_total_votes(min_total: int | None) -> int:
+    # Resolve configured per-option vote target, defaulting to 1.
+    return min_total if (min_total is not None and min_total > 0) else 1
+
+
+async def _runtime_vote_min_total(
+    repo: PostgresRepo,
+    config: Config,
+) -> int:
+    # Load runtime vote target from DB setting (fallback to config/env).
+    default_target = (
+        int(config.voting.min_total)
+        if config.voting.min_total is not None and int(config.voting.min_total) > 0
+        else 1
+    )
+    return await repo.get_vote_min_total(default_target=default_target)
+
+
+async def _runtime_vote_duration_seconds(
+    repo: PostgresRepo,
+    config: Config,
+) -> int:
+    # Load runtime vote duration from DB setting (fallback to config/env).
+    return await repo.get_vote_duration_seconds(
+        default_seconds=int(config.voting.duration_seconds),
+    )
 
 
 def build_application_vote_text(
@@ -98,7 +135,12 @@ async def start_vote(
     if app.get("vote_status") == VOTE_STATUS_OPEN:
         return app
 
-    vote_closes_at = utcnow() + timedelta(seconds=config.voting.duration_seconds)
+    runtime_duration_seconds = await _runtime_vote_duration_seconds(repo, config)
+    vote_closes_at = (
+        utcnow() + timedelta(seconds=runtime_duration_seconds)
+        if runtime_duration_seconds > 0
+        else None
+    )
     send_kwargs: dict[str, Any] = {}
     if config.voting.thread_id is not None:
         send_kwargs["message_thread_id"] = config.voting.thread_id
@@ -334,6 +376,7 @@ async def _finalize_vote_application(
     # Finalize one open application vote and notify applicant.
     approved: bool
     updated_row: dict[str, Any] | None = None
+    runtime_min_total = await _runtime_vote_min_total(repo, config)
 
     async with repo.pool.acquire() as conn:
         async with conn.transaction():
@@ -350,7 +393,7 @@ async def _finalize_vote_application(
             approved = calc_vote_result(
                 yes_count=yes_count,
                 no_count=no_count,
-                min_total=config.voting.min_total,
+                min_total=runtime_min_total,
                 require_yes_gt_no=config.voting.require_yes_gt_no,
             )
             new_status = _resolve_final_status(current_status=current_status, approved=approved)
@@ -413,6 +456,36 @@ async def _finalize_vote_application(
         approved=approved,
     )
     return True
+
+
+async def finalize_vote_if_target_reached(
+    bot: Bot,
+    config: Config,
+    repo: PostgresRepo,
+    *,
+    application_row: dict[str, Any],
+) -> bool:
+    # Finalize vote immediately once yes/no reaches target votes.
+    if not application_row:
+        return False
+    if application_row.get("vote_status") != VOTE_STATUS_OPEN:
+        return False
+
+    yes_count = int(application_row.get("vote_yes_count") or 0)
+    no_count = int(application_row.get("vote_no_count") or 0)
+    target_votes = _target_total_votes(await _runtime_vote_min_total(repo, config))
+    if yes_count < target_votes and no_count < target_votes:
+        return False
+
+    application_id = application_row.get("id")
+    if application_id is None:
+        return False
+    return await _finalize_vote_application(
+        bot=bot,
+        config=config,
+        repo=repo,
+        application_id=int(application_id),
+    )
 
 
 async def close_due_votes(

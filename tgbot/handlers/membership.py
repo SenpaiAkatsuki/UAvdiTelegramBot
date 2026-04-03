@@ -5,6 +5,7 @@ from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from aiogram import F, Router
+from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import CommandStart
 from aiogram.types import CallbackQuery, Message
 
@@ -35,6 +36,18 @@ Drives /start branching by application status and exposes bind-confirm request a
 membership_router = Router()
 
 TOKEN_TTL_HOURS = 24
+USER_START_WELCOME_TEXT = (
+    "👋 Вітаємо вас!\n"
+    "Це офіційний бот Української Асоціації Ветеринарної Візуальної Діагностики.\n\n"
+    "Тут ви зможете:\n"
+    "🔹 отримувати актуальні новини та анонси подій\n"
+    "🔹 дізнаватися про навчання, лекції та курси\n"
+    "🔹 знаходити корисні матеріали та рекомендації\n"
+    "🔹 бути частиною професійної спільноти, яка реально рухає стандарти "
+    "ветеринарної візуальної діагностики в Україні вперед\n\n"
+    "Раді бачити вас серед нас!"
+)
+MENU_MEMBER_STATUSES = {"member", "administrator", "creator"}
 
 
 def build_tokenized_url(base_url: str, token: str) -> str:
@@ -70,11 +83,30 @@ def has_active_subscription(user_row: dict[str, Any] | None) -> bool:
     return expires_at > datetime.now(timezone.utc)
 
 
+async def is_user_in_membership_group(
+    message: Message,
+    config: Config,
+    tg_user_id: int,
+) -> bool:
+    # Check whether user is already a member/admin/owner in membership group.
+    membership_chat_id = config.chat.membership_chat_id
+    if not membership_chat_id:
+        return False
+    try:
+        chat_member = await message.bot.get_chat_member(
+            chat_id=membership_chat_id,
+            user_id=tg_user_id,
+        )
+    except TelegramAPIError:
+        return False
+    return str(chat_member.status).lower() in MENU_MEMBER_STATUSES
+
+
 async def send_menu_entry(
     message: Message,
     *,
     is_admin: bool,
-    text: str = "You can now use the menu.",
+    text: str = "📋 Тепер ви можете користуватися меню.",
 ) -> None:
     # Send menu entry button and track message for cleanup.
     if message.from_user is not None:
@@ -150,12 +182,12 @@ async def membership_start(
     # Main /start router for membership lifecycle states.
     from_user = message.from_user
     if from_user is None:
-        await message.answer("Unable to identify user.")
+        await message.answer("⚠️ Не вдалося визначити користувача.")
         return
 
     await repo.create_or_update_user(
         tg_user_id=from_user.id,
-        full_name=from_user.full_name or "Unknown",
+        full_name=from_user.full_name or "Невідомо",
         username=from_user.username,
         language_code=from_user.language_code,
     )
@@ -194,10 +226,7 @@ async def membership_start(
         sent = await send_action_message(
             message,
             tg_user_id=from_user.id,
-            text=(
-                "Please submit your application from this button.\n"
-                "Submissions from this tokenized link are processed automatically."
-            ),
+            text=USER_START_WELCOME_TEXT,
             reply_markup=application_entry_keyboard(
                 application_url=tokenized_url,
             ),
@@ -212,14 +241,11 @@ async def membership_start(
         return
 
     if status == "APPLICATION_PENDING":
-        await send_menu_entry(
-            message,
-            is_admin=is_admin,
-            text=(
-                "Your application is pending review. Please wait for admin decision.\n\n"
-                "You can now use the menu."
-            ),
+        await message.answer(
+            "⏳ Ваша заявка на розгляді. Будь ласка, дочекайтеся рішення адміністраторів."
         )
+        if is_admin:
+            await send_menu_entry(message, is_admin=True)
         return
 
     if status == "UNLINKED_APPLICATION_APPROVED":
@@ -227,64 +253,74 @@ async def membership_start(
             message,
             tg_user_id=from_user.id,
             text=(
-                "We found an approved website application not linked to your Telegram account.\n"
-                "Please request bind confirmation before payment."
+                "🔎 Знайдено підтверджену заявку із сайту, яка ще не привʼязана до вашого Telegram-акаунта.\n"
+                "Будь ласка, запросіть підтвердження привʼязки перед оплатою."
             ),
             reply_markup=bind_confirmation_keyboard(),
         )
-        await send_menu_entry(message, is_admin=is_admin)
+        if is_admin:
+            await send_menu_entry(message, is_admin=True)
         return
 
     if status == "APPROVED_AWAITING_PAYMENT":
         await send_action_message(
             message,
             tg_user_id=from_user.id,
-            text="Your application is approved. Complete payment to continue.",
+            text="✅ Вашу заявку підтверджено. Завершіть оплату, щоб продовжити.",
             reply_markup=payment_keyboard(),
         )
-        await send_menu_entry(message, is_admin=is_admin)
+        if is_admin:
+            await send_menu_entry(message, is_admin=True)
         return
 
     if status in {"PAID_AWAITING_JOIN", "ACTIVE_MEMBER"}:
         if has_active_subscription(panel_data):
-            if status == "PAID_AWAITING_JOIN":
-                await send_action_message(
-                    message,
-                    tg_user_id=from_user.id,
-                    text="Payment confirmed. Use the button below to get group access.",
-                    reply_markup=group_access_keyboard(),
-                )
-            else:
+            is_in_group = await is_user_in_membership_group(
+                message=message,
+                config=config,
+                tg_user_id=from_user.id,
+            )
+            if is_in_group:
+                if status == "PAID_AWAITING_JOIN" and application_id is not None:
+                    await repo.update_application_status(
+                        application_id=application_id,
+                        status="ACTIVE_MEMBER",
+                    )
                 await send_menu_entry(
                     message,
                     is_admin=is_admin,
                     text=(
-                        "Membership is active. Group access link is no longer required.\n\n"
-                        "You can now use the menu."
+                        "✅ Ви вже в групі спільноти. Тепер можете користуватися меню."
                     ),
                 )
                 return
+
+            if status in {"PAID_AWAITING_JOIN", "ACTIVE_MEMBER"}:
+                await send_action_message(
+                    message,
+                    tg_user_id=from_user.id,
+                    text="✅ Оплату підтверджено. Натисніть кнопку нижче, щоб отримати доступ до групи.",
+                    reply_markup=group_access_keyboard(),
+                )
         else:
             await send_action_message(
                 message,
                 tg_user_id=from_user.id,
                 text=(
-                    "Renew required: your subscription is expired.\n"
-                    "Tap Renew membership to extend for 365 days."
+                    "⏳ Потрібно продовжити підписку: термін дії завершився.\n"
+                    "Натисніть кнопку продовження, щоб активувати ще 365 днів."
                 ),
-                reply_markup=payment_keyboard(pay_button_text="Renew membership"),
+                reply_markup=payment_keyboard(pay_button_text="💳 Продовжити підписку"),
             )
-        await send_menu_entry(message, is_admin=is_admin)
+        if is_admin:
+            await send_menu_entry(message, is_admin=True)
         return
 
-    await send_menu_entry(
-        message,
-        is_admin=is_admin,
-        text=(
-            f"Current status: {status}. Application ID: {application_id or '-'}.\n\n"
-            "You can now use the menu."
-        ),
+    await message.answer(
+        f"ℹ️ Поточний статус: {status}. ID заявки: {application_id or '-'}."
     )
+    if is_admin:
+        await send_menu_entry(message, is_admin=True)
     if status not in {"NEW", "APPLICATION_REQUIRED"}:
         return
 
@@ -318,4 +354,4 @@ async def membership_bind_confirmation_request(
             tg_user_id=query.from_user.id,
         )
     if query.message is not None:
-        await query.message.answer("Bind confirmation request sent to admins.")
+        await query.message.answer("✅ Запит на підтвердження привʼязки надіслано адміністраторам.")

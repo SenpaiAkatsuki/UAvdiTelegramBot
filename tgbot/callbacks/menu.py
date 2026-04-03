@@ -14,11 +14,15 @@ VIEW_PROFILE = "profile"
 
 VIEW_ADMIN_ROOT = "admin_root"
 VIEW_ADMIN_MANAGEMENT = "admin_management"
+VIEW_ADMIN_PENDING = "pending"
 VIEW_ADMIN_ACTIVE = "active"
 VIEW_ADMIN_EXPIRING = "expiring"
 VIEW_ADMIN_EXPIRED = "expired"
 VIEW_ADMIN_USER_DETAIL = "user_detail"
 VIEW_ADMIN_SUBSCRIPTION_PRICE = "subscription_price"
+VIEW_ADMIN_APPROVE_PENDING = "approve_pending"
+VIEW_ADMIN_EXPIRING_SETTINGS = "expiring_settings"
+VIEW_ADMIN_VOTING_SETTINGS = "voting_settings"
 
 
 class MenuCallbackData(CallbackData, prefix="menu"):
