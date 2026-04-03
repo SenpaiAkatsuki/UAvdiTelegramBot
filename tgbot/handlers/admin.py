@@ -54,14 +54,14 @@ async def admin_start(message: Message) -> None:
         )
 
 
-@admin_router.message(Command("chatid"))
+@admin_router.message(AdminFilter(), Command("chatid"))
 async def get_chat_id(message: Message) -> None:
     # Return group/supergroup chat id for env setup.
     if message.chat.type in [ChatType.GROUP, ChatType.SUPERGROUP]:
         await message.reply(f"🆔 Chat ID: {message.chat.id}")
 
 
-@admin_router.message(Command("topicid"))
+@admin_router.message(AdminFilter(), Command("topicid"))
 async def get_topic_id(message: Message) -> None:
     # Return current topic id in forum chats.
     thread_id = getattr(message, "message_thread_id", None)

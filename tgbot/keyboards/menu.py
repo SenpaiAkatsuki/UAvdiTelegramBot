@@ -10,12 +10,14 @@ from tgbot.callbacks.menu import (
     SCOPE_ADMIN,
     SCOPE_USER,
     VIEW_ADMIN_ACTIVE,
+    VIEW_ADMIN_APPROVE_PENDING,
     VIEW_ADMIN_EXPIRED,
-    VIEW_ADMIN_EXPIRING,
     VIEW_ADMIN_MANAGEMENT,
+    VIEW_ADMIN_PENDING,
     VIEW_ADMIN_ROOT,
     VIEW_ADMIN_SUBSCRIPTION_PRICE,
     VIEW_ADMIN_USER_DETAIL,
+    VIEW_ADMIN_VOTING_SETTINGS,
     VIEW_PROFILE,
     VIEW_USER_ROOT,
 )
@@ -25,6 +27,7 @@ Inline menu keyboards.
 
 Builds user/admin menu screens, member list pagination, and back-navigation buttons.
 """
+
 
 def safe_member_label(member: dict) -> str:
     # Format compact member title for admin list button.
@@ -113,12 +116,12 @@ def admin_management_keyboard() -> InlineKeyboardMarkup:
     # Admin management screens navigation.
     keyboard = InlineKeyboardBuilder()
     keyboard.button(
-        text="✅ Активні учасники",
-        callback_data=MenuCallbackData(scope=SCOPE_ADMIN, view=VIEW_ADMIN_ACTIVE, page=0),
+        text="🕒 Очікують схвалення",
+        callback_data=MenuCallbackData(scope=SCOPE_ADMIN, view=VIEW_ADMIN_PENDING, page=0),
     )
     keyboard.button(
-        text="⏳ Закінчуються ≤30 днів",
-        callback_data=MenuCallbackData(scope=SCOPE_ADMIN, view=VIEW_ADMIN_EXPIRING, page=0),
+        text="✅ Активні учасники",
+        callback_data=MenuCallbackData(scope=SCOPE_ADMIN, view=VIEW_ADMIN_ACTIVE, page=0),
     )
     keyboard.button(
         text="❌ Прострочені",
@@ -132,10 +135,17 @@ def admin_management_keyboard() -> InlineKeyboardMarkup:
         ),
     )
     keyboard.button(
+        text="🗳 Налаштування голосування",
+        callback_data=MenuCallbackData(
+            scope=SCOPE_ADMIN,
+            view=VIEW_ADMIN_VOTING_SETTINGS,
+        ),
+    )
+    keyboard.button(
         text="⬅️ Назад",
         callback_data=MenuCallbackData(scope=SCOPE_ADMIN, view=VIEW_ADMIN_ROOT),
     )
-    keyboard.adjust(2, 2, 1)
+    keyboard.adjust(1, 2, 2)
     return keyboard.as_markup()
 
 
@@ -158,6 +168,36 @@ def admin_subscription_price_keyboard() -> InlineKeyboardMarkup:
         ),
     )
     keyboard.adjust(1, 1)
+    return keyboard.as_markup()
+
+
+def admin_voting_settings_keyboard() -> InlineKeyboardMarkup:
+    # Voting-setup keyboard.
+    keyboard = InlineKeyboardBuilder()
+    keyboard.button(
+        text="✍️ Ціль голосів",
+        callback_data=MenuCallbackData(
+            scope=SCOPE_ADMIN,
+            view=VIEW_ADMIN_VOTING_SETTINGS,
+            back_view="custom_target",
+        ),
+    )
+    keyboard.button(
+        text="✍️ Тривалість опиту (сек.)",
+        callback_data=MenuCallbackData(
+            scope=SCOPE_ADMIN,
+            view=VIEW_ADMIN_VOTING_SETTINGS,
+            back_view="custom_duration",
+        ),
+    )
+    keyboard.button(
+        text="⬅️ Назад",
+        callback_data=MenuCallbackData(
+            scope=SCOPE_ADMIN,
+            view=VIEW_ADMIN_MANAGEMENT,
+        ),
+    )
+    keyboard.adjust(1, 1, 1)
     return keyboard.as_markup()
 
 
@@ -228,9 +268,26 @@ def admin_members_list_keyboard(
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def admin_user_detail_keyboard(*, back_view: str, page: int) -> InlineKeyboardMarkup:
+def admin_user_detail_keyboard(
+    *,
+    back_view: str,
+    page: int,
+    target_user_id: int,
+    show_approve: bool,
+) -> InlineKeyboardMarkup:
     # Back button from member detail to source list page.
     keyboard = InlineKeyboardBuilder()
+    if show_approve:
+        keyboard.button(
+            text="✅ Схвалити без голосування",
+            callback_data=MenuCallbackData(
+                scope=SCOPE_ADMIN,
+                view=VIEW_ADMIN_APPROVE_PENDING,
+                page=max(page, 0),
+                target_user_id=target_user_id,
+                back_view=back_view,
+            ),
+        )
     keyboard.button(
         text="⬅️ Назад",
         callback_data=MenuCallbackData(
@@ -239,7 +296,7 @@ def admin_user_detail_keyboard(*, back_view: str, page: int) -> InlineKeyboardMa
             page=max(page, 0),
         ),
     )
-    keyboard.adjust(1)
+    keyboard.adjust(1, 1)
     return keyboard.as_markup()
 
 

@@ -29,6 +29,9 @@ def _utcnow() -> datetime:
 
 
 SUBSCRIPTION_PRICE_MINOR_SETTING_KEY = "subscription_price_minor"
+EXPIRING_WINDOW_DAYS_SETTING_KEY = "expiring_window_days"
+VOTE_MIN_TOTAL_SETTING_KEY = "vote_min_total"
+VOTE_DURATION_SECONDS_SETTING_KEY = "vote_duration_seconds"
 
 
 def _to_jsonb(value: Mapping[str, Any] | None = None) -> str:
@@ -137,6 +140,78 @@ class PostgresRepo:
         normalized = max(int(amount_minor), 1)
         await self.set_setting(
             key=SUBSCRIPTION_PRICE_MINOR_SETTING_KEY,
+            value_text=str(normalized),
+            updated_by_tg_user_id=updated_by_tg_user_id,
+        )
+        return normalized
+
+    async def get_expiring_window_days(self, default_days: int = 30) -> int:
+        value_text = await self.get_setting(EXPIRING_WINDOW_DAYS_SETTING_KEY)
+        fallback = max(int(default_days), 1)
+        if value_text is None:
+            return fallback
+        try:
+            parsed = int(value_text)
+        except ValueError:
+            return fallback
+        return max(parsed, 1)
+
+    async def set_expiring_window_days(
+        self,
+        days: int,
+        updated_by_tg_user_id: int | None = None,
+    ) -> int:
+        normalized = max(int(days), 1)
+        await self.set_setting(
+            key=EXPIRING_WINDOW_DAYS_SETTING_KEY,
+            value_text=str(normalized),
+            updated_by_tg_user_id=updated_by_tg_user_id,
+        )
+        return normalized
+
+    async def get_vote_min_total(self, default_target: int = 1) -> int:
+        value_text = await self.get_setting(VOTE_MIN_TOTAL_SETTING_KEY)
+        fallback = max(int(default_target), 1)
+        if value_text is None:
+            return fallback
+        try:
+            parsed = int(value_text)
+        except ValueError:
+            return fallback
+        return max(parsed, 1)
+
+    async def set_vote_min_total(
+        self,
+        target: int,
+        updated_by_tg_user_id: int | None = None,
+    ) -> int:
+        normalized = max(int(target), 1)
+        await self.set_setting(
+            key=VOTE_MIN_TOTAL_SETTING_KEY,
+            value_text=str(normalized),
+            updated_by_tg_user_id=updated_by_tg_user_id,
+        )
+        return normalized
+
+    async def get_vote_duration_seconds(self, default_seconds: int) -> int:
+        value_text = await self.get_setting(VOTE_DURATION_SECONDS_SETTING_KEY)
+        fallback = max(int(default_seconds), 0)
+        if value_text is None:
+            return fallback
+        try:
+            parsed = int(value_text)
+        except ValueError:
+            return fallback
+        return max(parsed, 0)
+
+    async def set_vote_duration_seconds(
+        self,
+        seconds: int,
+        updated_by_tg_user_id: int | None = None,
+    ) -> int:
+        normalized = max(int(seconds), 0)
+        await self.set_setting(
+            key=VOTE_DURATION_SECONDS_SETTING_KEY,
             value_text=str(normalized),
             updated_by_tg_user_id=updated_by_tg_user_id,
         )
@@ -326,6 +401,44 @@ class PostgresRepo:
                   AND u.subscription_expires_at IS NOT NULL
                   AND u.subscription_expires_at > NOW()
                 ORDER BY u.subscription_expires_at ASC, u.tg_user_id ASC
+                LIMIT $1 OFFSET $2;
+                """,
+                limit,
+                offset,
+            )
+            return [dict(row) for row in rows]
+        finally:
+            await self._release_conn(acquired, conn)
+
+    async def list_pending_approval_members(
+        self,
+        limit: int,
+        offset: int,
+        conn: Connection | None = None,
+    ) -> list[dict[str, Any]]:
+        acquired = await self._acquire_conn(conn)
+        try:
+            rows = await acquired.fetch(
+                """
+                SELECT
+                    u.tg_user_id,
+                    u.username,
+                    u.full_name,
+                    u.member_since,
+                    u.subscription_expires_at,
+                    u.subscription_status,
+                    app.id AS application_id,
+                    app.status AS application_status
+                FROM users u
+                JOIN LATERAL (
+                    SELECT id, status, created_at
+                    FROM applications
+                    WHERE tg_user_id = u.tg_user_id
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                ) app ON TRUE
+                WHERE app.status = 'APPLICATION_PENDING'
+                ORDER BY app.created_at ASC, u.tg_user_id ASC
                 LIMIT $1 OFFSET $2;
                 """,
                 limit,
@@ -605,6 +718,51 @@ class PostgresRepo:
         finally:
             await self._release_conn(acquired, conn)
 
+    async def approve_pending_application_for_user(
+        self,
+        tg_user_id: int,
+    ) -> dict[str, Any] | None:
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                latest = await conn.fetchrow(
+                    """
+                    SELECT *
+                    FROM applications
+                    WHERE tg_user_id = $1
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                    FOR UPDATE;
+                    """,
+                    tg_user_id,
+                )
+                if latest is None:
+                    return None
+
+                current_status = str(latest["status"] or "")
+                if current_status == "APPLICATION_PENDING":
+                    target_status = "APPROVED_AWAITING_PAYMENT"
+                elif current_status == "UNLINKED_APPLICATION_PENDING":
+                    target_status = "UNLINKED_APPLICATION_APPROVED"
+                else:
+                    return dict(latest)
+
+                updated = await conn.fetchrow(
+                    """
+                    UPDATE applications
+                    SET
+                        status = $2,
+                        vote_status = 'PROCESSED',
+                        approved_at = COALESCE(approved_at, NOW()),
+                        rejected_at = NULL,
+                        updated_at = NOW()
+                    WHERE id = $1
+                    RETURNING *;
+                    """,
+                    int(latest["id"]),
+                    target_status,
+                )
+                return _record_to_dict(updated)
+
     async def create_payment(
         self,
         application_id: int,
@@ -730,9 +888,21 @@ class PostgresRepo:
                     await conn.execute(
                         """
                         UPDATE applications
-                        SET status = 'PAID_AWAITING_JOIN', updated_at = NOW()
+                        SET
+                            status = 'PAID_AWAITING_JOIN',
+                            vote_status = CASE
+                                WHEN status = 'APPLICATION_PENDING' THEN 'PROCESSED'
+                                ELSE vote_status
+                            END,
+                            approved_at = CASE
+                                WHEN status IN ('APPROVED_AWAITING_PAYMENT', 'UNLINKED_APPLICATION_APPROVED', 'APPLICATION_PENDING')
+                                    THEN COALESCE(approved_at, NOW())
+                                ELSE approved_at
+                            END,
+                            rejected_at = NULL,
+                            updated_at = NOW()
                         WHERE id = $1
-                          AND status IN ('APPROVED_AWAITING_PAYMENT', 'UNLINKED_APPLICATION_APPROVED');
+                          AND status IN ('APPROVED_AWAITING_PAYMENT', 'UNLINKED_APPLICATION_APPROVED', 'APPLICATION_PENDING');
                         """,
                         payment["application_id"],
                     )
@@ -875,9 +1045,21 @@ class PostgresRepo:
                 await conn.execute(
                     """
                     UPDATE applications
-                    SET status = 'PAID_AWAITING_JOIN', updated_at = NOW()
+                    SET
+                        status = 'PAID_AWAITING_JOIN',
+                        vote_status = CASE
+                            WHEN status = 'APPLICATION_PENDING' THEN 'PROCESSED'
+                            ELSE vote_status
+                        END,
+                        approved_at = CASE
+                            WHEN status IN ('APPROVED_AWAITING_PAYMENT', 'UNLINKED_APPLICATION_APPROVED', 'APPLICATION_PENDING')
+                                THEN COALESCE(approved_at, NOW())
+                            ELSE approved_at
+                        END,
+                        rejected_at = NULL,
+                        updated_at = NOW()
                     WHERE id = $1
-                      AND status IN ('APPROVED_AWAITING_PAYMENT', 'UNLINKED_APPLICATION_APPROVED');
+                      AND status IN ('APPROVED_AWAITING_PAYMENT', 'UNLINKED_APPLICATION_APPROVED', 'APPLICATION_PENDING');
                     """,
                     int(app_before["id"]),
                 )
@@ -993,6 +1175,29 @@ class PostgresRepo:
                 token,
             )
             return _record_to_dict(row)
+        finally:
+            await self._release_conn(acquired, conn)
+
+    async def list_application_token_records_for_user(
+        self,
+        tg_user_id: int,
+        limit: int = 20,
+        conn: Connection | None = None,
+    ) -> list[dict[str, Any]]:
+        acquired = await self._acquire_conn(conn)
+        try:
+            rows = await acquired.fetch(
+                """
+                SELECT *
+                FROM application_tokens
+                WHERE tg_user_id = $1
+                ORDER BY created_at DESC
+                LIMIT $2;
+                """,
+                tg_user_id,
+                limit,
+            )
+            return [dict(row) for row in rows]
         finally:
             await self._release_conn(acquired, conn)
 

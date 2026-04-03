@@ -5,6 +5,7 @@ from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from aiogram import F, Router
+from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import CommandStart
 from aiogram.types import CallbackQuery, Message
 
@@ -46,6 +47,7 @@ USER_START_WELCOME_TEXT = (
     "ветеринарної візуальної діагностики в Україні вперед\n\n"
     "Раді бачити вас серед нас!"
 )
+MENU_MEMBER_STATUSES = {"member", "administrator", "creator"}
 
 
 def build_tokenized_url(base_url: str, token: str) -> str:
@@ -79,6 +81,25 @@ def has_active_subscription(user_row: dict[str, Any] | None) -> bool:
     if not isinstance(expires_at, datetime):
         return False
     return expires_at > datetime.now(timezone.utc)
+
+
+async def is_user_in_membership_group(
+    message: Message,
+    config: Config,
+    tg_user_id: int,
+) -> bool:
+    # Check whether user is already a member/admin/owner in membership group.
+    membership_chat_id = config.chat.membership_chat_id
+    if not membership_chat_id:
+        return False
+    try:
+        chat_member = await message.bot.get_chat_member(
+            chat_id=membership_chat_id,
+            user_id=tg_user_id,
+        )
+    except TelegramAPIError:
+        return False
+    return str(chat_member.status).lower() in MENU_MEMBER_STATUSES
 
 
 async def send_menu_entry(
@@ -220,14 +241,11 @@ async def membership_start(
         return
 
     if status == "APPLICATION_PENDING":
-        await send_menu_entry(
-            message,
-            is_admin=is_admin,
-            text=(
-                "⏳ Ваша заявка на розгляді. Будь ласка, дочекайтеся рішення адміністраторів.\n\n"
-                "📋 Тепер ви можете користуватися меню."
-            ),
+        await message.answer(
+            "⏳ Ваша заявка на розгляді. Будь ласка, дочекайтеся рішення адміністраторів."
         )
+        if is_admin:
+            await send_menu_entry(message, is_admin=True)
         return
 
     if status == "UNLINKED_APPLICATION_APPROVED":
@@ -240,7 +258,8 @@ async def membership_start(
             ),
             reply_markup=bind_confirmation_keyboard(),
         )
-        await send_menu_entry(message, is_admin=is_admin)
+        if is_admin:
+            await send_menu_entry(message, is_admin=True)
         return
 
     if status == "APPROVED_AWAITING_PAYMENT":
@@ -250,28 +269,39 @@ async def membership_start(
             text="✅ Вашу заявку підтверджено. Завершіть оплату, щоб продовжити.",
             reply_markup=payment_keyboard(),
         )
-        await send_menu_entry(message, is_admin=is_admin)
+        if is_admin:
+            await send_menu_entry(message, is_admin=True)
         return
 
     if status in {"PAID_AWAITING_JOIN", "ACTIVE_MEMBER"}:
         if has_active_subscription(panel_data):
-            if status == "PAID_AWAITING_JOIN":
+            is_in_group = await is_user_in_membership_group(
+                message=message,
+                config=config,
+                tg_user_id=from_user.id,
+            )
+            if is_in_group:
+                if status == "PAID_AWAITING_JOIN" and application_id is not None:
+                    await repo.update_application_status(
+                        application_id=application_id,
+                        status="ACTIVE_MEMBER",
+                    )
+                await send_menu_entry(
+                    message,
+                    is_admin=is_admin,
+                    text=(
+                        "✅ Ви вже в групі спільноти. Тепер можете користуватися меню."
+                    ),
+                )
+                return
+
+            if status in {"PAID_AWAITING_JOIN", "ACTIVE_MEMBER"}:
                 await send_action_message(
                     message,
                     tg_user_id=from_user.id,
                     text="✅ Оплату підтверджено. Натисніть кнопку нижче, щоб отримати доступ до групи.",
                     reply_markup=group_access_keyboard(),
                 )
-            else:
-                await send_menu_entry(
-                    message,
-                    is_admin=is_admin,
-                    text=(
-                        "✅ Членство активне. Посилання для доступу до групи більше не потрібне.\n\n"
-                        "📋 Тепер ви можете користуватися меню."
-                    ),
-                )
-                return
         else:
             await send_action_message(
                 message,
@@ -282,17 +312,15 @@ async def membership_start(
                 ),
                 reply_markup=payment_keyboard(pay_button_text="💳 Продовжити підписку"),
             )
-        await send_menu_entry(message, is_admin=is_admin)
+        if is_admin:
+            await send_menu_entry(message, is_admin=True)
         return
 
-    await send_menu_entry(
-        message,
-        is_admin=is_admin,
-        text=(
-            f"ℹ️ Поточний статус: {status}. ID заявки: {application_id or '-'}.\n\n"
-            "📋 Тепер ви можете користуватися меню."
-        ),
+    await message.answer(
+        f"ℹ️ Поточний статус: {status}. ID заявки: {application_id or '-'}."
     )
+    if is_admin:
+        await send_menu_entry(message, is_admin=True)
     if status not in {"NEW", "APPLICATION_REQUIRED"}:
         return
 

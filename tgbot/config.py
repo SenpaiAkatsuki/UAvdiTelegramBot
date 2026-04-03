@@ -451,6 +451,7 @@ class VotingConfig:
         min_total_raw = env.str("VOTE_MIN_TOTAL", "").strip()
         min_total: int | None = None
         if min_total_raw:
+            # Target votes for one option (yes/no).
             parsed = int(min_total_raw)
             min_total = parsed if parsed > 0 else None
 
@@ -476,8 +477,8 @@ class VotingConfig:
                 "VOTING_CHAT_ID must be different from CHAT_MEMBERSHIP_CHAT_ID "
                 "(or set VOTING_ALLOW_SHARED_CHAT=true)"
             )
-        if self.duration_seconds <= 0:
-            raise ValueError("VOTE_DURATION_SECONDS must be > 0")
+        if self.duration_seconds < 0:
+            raise ValueError("VOTE_DURATION_SECONDS must be >= 0")
         if self.thread_id is not None and self.thread_id <= 0:
             raise ValueError("VOTING_TOPIC_ID (or legacy VOTING_THREAD_ID) must be > 0 when set")
 

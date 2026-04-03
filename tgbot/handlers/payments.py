@@ -19,10 +19,18 @@ from tgbot.services.menu_state import (
 """
 Payment handlers (LiqPay).
 
-Creates payment links, checks payment status, and supports admin test payment command.
+Creates payment links, supports admin test payment command,
+and keeps compatibility callback for old "check payment" buttons.
 """
 
 payments_router = Router()
+ADMIN_TEST_PAY_ALLOWED_STATUSES = {
+    "APPROVED_AWAITING_PAYMENT",
+    "UNLINKED_APPLICATION_APPROVED",
+    "PAID_AWAITING_JOIN",
+    "ACTIVE_MEMBER",
+}
+
 
 async def remove_callback_keyboard(query: CallbackQuery) -> None:
     # Remove source inline keyboard after callback handling.
@@ -138,6 +146,14 @@ def is_application_payment_eligible(application: dict) -> bool:
     return status in {"PAID_AWAITING_JOIN", "ACTIVE_MEMBER"}
 
 
+def is_admin_test_payment_safe(application: dict | None) -> bool:
+    # /pay must not create paid flows for pending/rejected applications.
+    if not application:
+        return False
+    status = str(application.get("status") or "")
+    return status in ADMIN_TEST_PAY_ALLOWED_STATUSES
+
+
 async def create_or_reuse_liqpay_payment(
     repo: PostgresRepo,
     config: Config,
@@ -146,7 +162,7 @@ async def create_or_reuse_liqpay_payment(
 ) -> dict:
     # Reuse valid pending payment or create a new one with runtime amount.
     runtime_amount_minor = await repo.get_subscription_price_minor(
-        default_minor=int(config.liqpay.amount_minor)
+        default_minor=int(config.liqpay.amount_minor),
     )
     existing_payment = await get_latest_open_payment_for_application(
         repo=repo,
@@ -196,7 +212,7 @@ async def admin_test_pay_link(
     repo: PostgresRepo,
     config: Config,
 ) -> None:
-    # Admin-only helper to create a direct LiqPay test link.
+    # Admin helper to create direct LiqPay test link.
     if message.from_user is None:
         await message.answer("⚠️ Не вдалося визначити користувача.", parse_mode=None)
         return
@@ -218,7 +234,7 @@ async def admin_test_pay_link(
 
     if arg_application_id is None:
         application = await get_latest_application_for_user(repo, message.from_user.id)
-        if application is None:
+        if application is None or not is_admin_test_payment_safe(application):
             await repo.create_or_update_user(
                 tg_user_id=message.from_user.id,
                 full_name=message.from_user.full_name,
@@ -230,7 +246,7 @@ async def admin_test_pay_link(
                 applicant_name=message.from_user.full_name,
                 status="APPROVED_AWAITING_PAYMENT",
             )
-            status_hint = f"{application.get('status', '-')} (автостворена тестова заявка)"
+            status_hint = f"{application.get('status', '-')} (created test application)"
         else:
             status_hint = str(application.get("status") or "-")
         target_application_id = int(application["id"])
@@ -239,6 +255,17 @@ async def admin_test_pay_link(
         if application is None:
             await message.answer(
                 f"⚠️ Заявку не знайдено: {arg_application_id}",
+                parse_mode=None,
+            )
+            return
+        if not is_admin_test_payment_safe(application):
+            await message.answer(
+                (
+                    "⚠️ /pay is blocked for this application status.\n"
+                    "Allowed statuses: APPROVED_AWAITING_PAYMENT, UNLINKED_APPLICATION_APPROVED, "
+                    "PAID_AWAITING_JOIN, ACTIVE_MEMBER.\n"
+                    "Use /pay without application_id to create a safe test application."
+                ),
                 parse_mode=None,
             )
             return
@@ -315,9 +342,8 @@ async def start_membership_payment(
         text=(
             "💳 Відкрийте сторінку оплати:\n"
             f"{pay_url}\n\n"
-            "Після успішної оплати натисніть «✅ Я оплатив(-ла), перевірити»."
+            "✅ Оплату підтвердимо автоматично після callback від LiqPay."
         ),
-        reply_markup=payment_keyboard(),
     )
     await remove_callback_keyboard(query)
 
@@ -327,7 +353,7 @@ async def check_membership_payment_status(
     query: CallbackQuery,
     repo: PostgresRepo,
 ) -> None:
-    # Re-check latest payment state and return next action to user.
+    # Compatibility handler for old messages with "check payment" button.
     await query.answer()
 
     if query.from_user is None:
@@ -352,7 +378,7 @@ async def check_membership_payment_status(
     if latest_payment is None:
         await send_tracked_action_message_from_query(
             query,
-            text="ℹ️ Платіж поки не знайдено. Спочатку натисніть кнопку оплати.",
+            text="ℹ️ Платіж не знайдено. Натисніть кнопку оплати.",
             reply_markup=payment_keyboard(),
         )
         await remove_callback_keyboard(query)
@@ -362,8 +388,7 @@ async def check_membership_payment_status(
     if payment_status == "PENDING":
         await send_tracked_action_message_from_query(
             query,
-            text="⏳ Платіж ще очікує callback від LiqPay. Зачекайте і перевірте ще раз.",
-            reply_markup=payment_keyboard(),
+            text="⏳ Платіж ще очікує callback від LiqPay. Перевірка виконується автоматично.",
         )
         await remove_callback_keyboard(query)
         return

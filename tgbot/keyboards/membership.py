@@ -25,19 +25,13 @@ def application_entry_keyboard(
 
 
 def payment_keyboard(pay_button_text: str = "💳 Оплатити членство") -> InlineKeyboardMarkup:
-    # Payment action keyboard with pay and status-check buttons.
+    # Payment action keyboard with a single pay button.
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
                     text=pay_button_text,
                     callback_data="membership_pay",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="✅ Я оплатив(-ла), перевірити",
-                    callback_data="membership_check_payment_status",
                 )
             ],
         ]
