@@ -300,27 +300,54 @@ def _build_liqpay_checkout_payload(
         "action": "pay",
         "amount": _amount_major_string(int(payment["amount_minor"])),
         "currency": str(payment["currency"]).upper(),
-        "description": f"UAvdi membership payment #{payment['id']}",
+        "description": f"UAVDI membership payment #{payment['id']}",
         "order_id": provider_order_id,
         "server_url": config.liqpay.callback_url(),
     }
 
 
-def _build_liqpay_checkout_html(data: str, signature: str) -> str:
+def _build_liqpay_checkout_html(
+    data: str,
+    signature: str,
+    *,
+    amount: str,
+    currency: str,
+    order_id: str,
+) -> str:
     data_escaped = html_escape(data)
     signature_escaped = html_escape(signature)
+    amount_escaped = html_escape(amount)
+    currency_escaped = html_escape(currency)
+    order_id_escaped = html_escape(order_id)
+    title = "Оплата членства UAVDI"
+    description = (
+        f"Безпечна оплата через LiqPay. Сума: {amount_escaped} {currency_escaped}. "
+        "Натисніть посилання, щоб продовжити."
+    )
+    title_escaped = html_escape(title)
+    description_escaped = html_escape(description)
     return f"""<!doctype html>
-<html lang="en">
+<html lang="uk">
   <head>
     <meta charset="utf-8" />
-    <title>Redirecting to LiqPay</title>
+    <title>{title_escaped}</title>
+    <meta name="description" content="{description_escaped}" />
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="{title_escaped}" />
+    <meta property="og:description" content="{description_escaped}" />
+    <meta property="og:site_name" content="UAVDI" />
+    <meta name="twitter:card" content="summary" />
+    <meta name="twitter:title" content="{title_escaped}" />
+    <meta name="twitter:description" content="{description_escaped}" />
   </head>
   <body>
-    <p>Redirecting to LiqPay checkout...</p>
+    <p>Перенаправлення на сторінку оплати LiqPay...</p>
+    <p>Замовлення: {order_id_escaped}</p>
+    <p>Сума: {amount_escaped} {currency_escaped}</p>
     <form id="liqpay_checkout" method="POST" action="https://www.liqpay.ua/api/3/checkout">
       <input type="hidden" name="data" value="{data_escaped}" />
       <input type="hidden" name="signature" value="{signature_escaped}" />
-      <noscript><button type="submit">Continue to LiqPay</button></noscript>
+      <noscript><button type="submit">Перейти до LiqPay</button></noscript>
     </form>
     <script>document.getElementById('liqpay_checkout').submit();</script>
   </body>
@@ -341,12 +368,8 @@ def _is_token_record_valid(token_record: Mapping[str, Any] | None) -> bool:
 
 def _build_unlinked_vote_text(
     application: Mapping[str, Any],
-    bind_token: str,
 ) -> str:
-    return (
-        build_application_vote_text(dict(application), branch="unlinked")
-        + f"\n\n🔗 Bind token: {bind_token}"
-    )
+    return build_application_vote_text(dict(application), branch="unlinked")
 
 
 async def _remove_token_entry_keyboard(
@@ -586,7 +609,6 @@ async def weblium_application_webhook(request: web.Request) -> web.Response:
             application_id=int(unlinked_application["id"]),
             application_text=_build_unlinked_vote_text(
                 dict(unlinked_application),
-                str(bind_record["token"]),
             ),
             bot=bot,
             config=config,
@@ -648,7 +670,13 @@ async def liqpay_pay_page(request: web.Request) -> web.Response:
         return web.Response(status=400, text=str(exc))
 
     return web.Response(
-        text=_build_liqpay_checkout_html(data=data, signature=signature),
+        text=_build_liqpay_checkout_html(
+            data=data,
+            signature=signature,
+            amount=str(payload.get("amount") or ""),
+            currency=str(payload.get("currency") or ""),
+            order_id=str(payload.get("order_id") or ""),
+        ),
         content_type="text/html",
     )
 

@@ -696,6 +696,45 @@ class PostgresRepo:
         finally:
             await self._release_conn(acquired, conn)
 
+    async def find_linked_tg_user_id_by_contacts(
+        self,
+        contact_phone: str | None,
+        contact_email: str | None,
+        conn: Connection | None = None,
+    ) -> int | None:
+        # Find latest Telegram-linked user by matching phone/email in applications.
+        phone = self._clean_string(contact_phone)
+        email = self._clean_string(contact_email)
+        if phone is None and email is None:
+            return None
+
+        acquired = await self._acquire_conn(conn)
+        try:
+            tg_user_id = await acquired.fetchval(
+                """
+                SELECT a.tg_user_id
+                FROM applications a
+                WHERE a.tg_user_id IS NOT NULL
+                  AND (
+                    ($1::text IS NOT NULL AND a.contact_phone = $1)
+                    OR (
+                        $2::text IS NOT NULL
+                        AND a.contact_email IS NOT NULL
+                        AND lower(a.contact_email) = lower($2)
+                    )
+                  )
+                ORDER BY a.created_at DESC
+                LIMIT 1;
+                """,
+                phone,
+                email,
+            )
+            if tg_user_id is None:
+                return None
+            return int(tg_user_id)
+        finally:
+            await self._release_conn(acquired, conn)
+
     async def update_application_status(
         self,
         application_id: int,

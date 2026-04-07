@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta, timezone
+from html import escape as html_escape
 from typing import Any
 
 from aiogram import Bot
@@ -91,19 +92,39 @@ def build_application_vote_text(
     branch: str,
 ) -> str:
     # Build human-readable vote context text for group.
+    def _display_value(value: Any) -> str | None:
+        if value is None:
+            return None
+        text = str(value).strip()
+        if not text or text == "-":
+            return None
+        return text
+
+    def _document_display(app: dict[str, Any]) -> str:
+        doc_url = _display_value(app.get("document_url"))
+        if doc_url:
+            safe_url = html_escape(doc_url, quote=True)
+            return f'<a href="{safe_url}">Відкрити документ</a>'
+        return "Не вказано"
+
+    def _text_display(value: Any, *, default: str = "-") -> str:
+        text = _display_value(value) or default
+        return html_escape(text, quote=False)
+
     branch_label = {
-        "matched": "from bot",
-        "unlinked": "from site (no Telegram link)",
+        "matched": "із бота",
+        "unlinked": "із сайту, без Telegram-прив'язки",
     }.get(branch, branch)
+    branch_label_safe = html_escape(branch_label, quote=False)
     return (
-        f"🗳 New application for review ({branch_label})\n\n"
-        f"📄 Application ID #{application.get('id')}\n"
-        f"👤 Name: {application.get('applicant_name') or '-'}\n"
-        f"📞 Phone: {application.get('contact_phone') or '-'}\n"
-        f"✉️ Email: {application.get('contact_email') or '-'}\n"
-        f"🩺 Specialization: {application.get('specialization') or '-'}\n"
-        f"📎 Document: {application.get('document_file_name') or '-'}\n\n"
-        "Choose a decision using buttons below."
+        f"🗳 Нова заявка на розгляд — {branch_label_safe}\n\n"
+        f"📄 Заявка #{_text_display(application.get('id'))}\n"
+        f"👤 Ім'я: {_text_display(application.get('applicant_name'))}\n"
+        f"📞 Телефон: {_text_display(application.get('contact_phone'))}\n"
+        f"✉️ Email: {_text_display(application.get('contact_email'))}\n"
+        f"🩺 Спеціалізація: {_text_display(application.get('specialization'))}\n"
+        f"📎 Документ: {_document_display(application)}\n\n"
+        "Оберіть рішення кнопками нижче."
     )
 
 
@@ -145,6 +166,10 @@ async def start_vote(
     if config.voting.thread_id is not None:
         send_kwargs["message_thread_id"] = config.voting.thread_id
 
+    contact_url = await _resolve_manual_contact_url(
+        repo=repo,
+        application_row=app,
+    )
     vote_message = await bot.send_message(
         chat_id=config.voting.chat_id,
         text=application_text,
@@ -152,8 +177,9 @@ async def start_vote(
             application_id=application_id,
             yes_count=0,
             no_count=0,
+            contact_url=contact_url,
         ),
-        parse_mode=None,
+        parse_mode="HTML",
         **send_kwargs,
     )
 
@@ -260,6 +286,7 @@ async def cast_admin_vote(
 async def refresh_vote_message_markup(
     bot: Bot,
     *,
+    repo: PostgresRepo,
     application_row: dict[str, Any],
 ) -> None:
     # Refresh inline vote keyboard with current counters.
@@ -271,6 +298,10 @@ async def refresh_vote_message_markup(
 
     yes_count = int(application_row.get("vote_yes_count") or 0)
     no_count = int(application_row.get("vote_no_count") or 0)
+    contact_url = await _resolve_manual_contact_url(
+        repo=repo,
+        application_row=application_row,
+    )
 
     try:
         await bot.edit_message_reply_markup(
@@ -280,6 +311,7 @@ async def refresh_vote_message_markup(
                 application_id=int(application_id),
                 yes_count=yes_count,
                 no_count=no_count,
+                contact_url=contact_url,
             ),
         )
     except TelegramBadRequest as exc:
@@ -317,8 +349,8 @@ async def notify_vote_result_user(
                 bot=bot,
                 user_id=tg_user_id,
                 text=(
-                    "✅ Your application has been approved by community vote.\n"
-                    "You can now proceed to payment."
+                    "✅ Вашу заявку схвалено голосуванням спільноти.\n"
+                    "Тепер можете перейти до оплати."
                 ),
                 reply_markup=payment_keyboard(),
                 context={
@@ -330,7 +362,7 @@ async def notify_vote_result_user(
         await notify_user(
             bot=bot,
             user_id=tg_user_id,
-            text="✅ Your application content is approved. Please wait for the next step.",
+            text="✅ Контент заявки схвалено. Очікуйте на наступний крок.",
             context={
                 "event": "vote_application_content_approved",
                 "application_id": application_id,
@@ -342,8 +374,8 @@ async def notify_vote_result_user(
         bot=bot,
         user_id=tg_user_id,
         text=(
-            "❌ Your application was rejected by community vote.\n"
-            "Contact admins for details."
+            "❌ Вашу заявку відхилено голосуванням спільноти.\n"
+            "Зверніться до адміністраторів для деталей."
         ),
         context={
             "event": "vote_application_rejected",
@@ -364,6 +396,155 @@ def _resolve_final_status(current_status: str, approved: bool) -> str:
     if current_status in {"APPLICATION_PENDING", "UNLINKED_APPLICATION_PENDING"}:
         return "REJECTED"
     return current_status
+
+
+def _resolve_vote_branch(source: str | None) -> str:
+    # Map application source to vote text branch label.
+    if source == "site_direct":
+        return "unlinked"
+    return "matched"
+
+
+def _build_final_vote_line(
+    approved: bool,
+    yes_count: int,
+    no_count: int,
+) -> str:
+    # Build concise final decision line for the vote message.
+    decision = "СХВАЛЕНО" if approved else "ВІДХИЛЕНО"
+    return f"Підсумок голосування: {decision} (За: {yes_count}, Проти: {no_count})"
+
+
+def _build_final_manual_note(
+    application_row: dict[str, Any],
+    approved: bool,
+) -> str | None:
+    # Show manual action hint only for approved site-origin applications.
+    if not approved:
+        return None
+    if str(application_row.get("source") or "") != "site_direct":
+        return None
+    return (
+        "⚠️ Заявку подано із сайту. Після схвалення потрібен ручний контакт із заявником."
+    )
+
+
+async def _resolve_manual_contact_url(
+    repo: PostgresRepo,
+    application_row: dict[str, Any],
+) -> str | None:
+    # Resolve Telegram contact URL for manual-contact button.
+    tg_user_id = application_row.get("tg_user_id")
+    if tg_user_id is None:
+        tg_user_id = await repo.find_linked_tg_user_id_by_contacts(
+            contact_phone=application_row.get("contact_phone"),
+            contact_email=application_row.get("contact_email"),
+        )
+    if tg_user_id is None:
+        return None
+
+    user_row = await repo.get_user_by_tg_user_id(int(tg_user_id))
+    username = (user_row or {}).get("username")
+    if isinstance(username, str):
+        cleaned = username.strip().lstrip("@")
+        if cleaned:
+            return f"https://t.me/{cleaned}"
+
+    return f"tg://user?id={int(tg_user_id)}"
+
+
+async def _update_final_vote_message(
+    bot: Bot,
+    *,
+    repo: PostgresRepo,
+    application_row: dict[str, Any],
+    approved: bool,
+) -> None:
+    # Edit vote message text on close and remove inline keyboard.
+    chat_id = application_row.get("vote_chat_id")
+    message_id = application_row.get("vote_message_id")
+    application_id = application_row.get("id")
+    if chat_id is None or message_id is None or application_id is None:
+        return
+
+    yes_count = int(application_row.get("vote_yes_count") or 0)
+    no_count = int(application_row.get("vote_no_count") or 0)
+    branch = _resolve_vote_branch(str(application_row.get("source") or ""))
+    base_text = build_application_vote_text(application_row, branch=branch)
+    final_line = _build_final_vote_line(
+        approved=approved,
+        yes_count=yes_count,
+        no_count=no_count,
+    )
+    manual_note = _build_final_manual_note(
+        application_row=application_row,
+        approved=approved,
+    )
+    contact_url = await _resolve_manual_contact_url(
+        repo=repo,
+        application_row=application_row,
+    )
+    final_text = f"{base_text}\n\n{final_line}"
+    if manual_note:
+        final_text = f"{final_text}\n{manual_note}"
+    final_reply_markup = (
+        application_vote_keyboard(
+            application_id=int(application_id),
+            yes_count=yes_count,
+            no_count=no_count,
+            include_vote_buttons=False,
+            contact_url=contact_url,
+        )
+        if approved
+        else None
+    )
+
+    try:
+        await bot.edit_message_text(
+            chat_id=int(chat_id),
+            message_id=int(message_id),
+            text=final_text,
+            reply_markup=final_reply_markup,
+            parse_mode="HTML",
+        )
+        return
+    except TelegramBadRequest as exc:
+        message = (exc.message or "").lower()
+        if "message is not modified" in message:
+            return
+        if "message to edit not found" in message or "message can't be edited" in message:
+            return
+        logger.warning(
+            "Failed to edit finalized vote message. application_id=%s error=%s",
+            application_id,
+            exc.message,
+        )
+    except TelegramAPIError:
+        logger.exception(
+            "Telegram API error while editing finalized vote message. application_id=%s",
+            application_id,
+        )
+
+    try:
+        await bot.edit_message_reply_markup(
+            chat_id=int(chat_id),
+            message_id=int(message_id),
+            reply_markup=final_reply_markup,
+        )
+    except TelegramBadRequest as exc:
+        message = (exc.message or "").lower()
+        if "message is not modified" in message or "message to edit not found" in message:
+            return
+        logger.warning(
+            "Failed to remove closed vote keyboard. application_id=%s error=%s",
+            application_id,
+            exc.message,
+        )
+    except TelegramAPIError:
+        logger.exception(
+            "Telegram API error while removing closed vote keyboard. application_id=%s",
+            application_id,
+        )
 
 
 async def _finalize_vote_application(
@@ -427,28 +608,12 @@ async def _finalize_vote_application(
     if updated_row is None:
         return False
 
-    chat_id = updated_row.get("vote_chat_id")
-    message_id = updated_row.get("vote_message_id")
-    if chat_id is not None and message_id is not None:
-        try:
-            await bot.edit_message_reply_markup(
-                chat_id=int(chat_id),
-                message_id=int(message_id),
-                reply_markup=None,
-            )
-        except TelegramBadRequest as exc:
-            message = (exc.message or "").lower()
-            if "message is not modified" not in message and "message to edit not found" not in message:
-                logger.warning(
-                    "Failed to remove closed vote keyboard. application_id=%s error=%s",
-                    application_id,
-                    exc.message,
-                )
-        except TelegramAPIError:
-            logger.exception(
-                "Telegram API error while removing closed vote keyboard. application_id=%s",
-                application_id,
-            )
+    await _update_final_vote_message(
+        bot=bot,
+        repo=repo,
+        application_row=updated_row,
+        approved=approved,
+    )
 
     await notify_vote_result_user(
         bot=bot,
