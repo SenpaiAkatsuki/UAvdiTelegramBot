@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from aiogram import F, Router
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.types import CallbackQuery
 
 from tgbot.callbacks.voting import (
+    ApplicationVoteContactCallbackData,
     ApplicationVoteCallbackData,
     VOTE_DECISION_APPROVE,
 )
@@ -21,17 +23,100 @@ from tgbot.services.application_voting import (
 )
 
 """
-Admin application voting callbacks.
+Application voting callbacks.
 
-Handles inline approve/reject vote buttons in one-message group vote flow.
+Handles inline approve/reject vote buttons in one-message voting-group flow.
 """
 
 admin_applications_router = Router()
 
 
-def _is_admin(config: Config, tg_user_id: int) -> bool:
-    # Check whether user id is in configured admin list.
-    return tg_user_id in config.tg_bot.admin_ids
+def _is_chat_member_status(status: str) -> bool:
+    # Return True for active chat-member statuses.
+    return status in {"creator", "administrator", "member", "restricted"}
+
+
+async def _can_vote_in_voting_chat(
+    query: CallbackQuery,
+    config: Config,
+) -> bool:
+    # Allow voting only from members of configured voting group.
+    if query.from_user is None or query.message is None:
+        return False
+
+    voting_chat_id = config.voting.chat_id
+    if voting_chat_id is None:
+        return False
+
+    message_chat = query.message.chat
+    if int(message_chat.id) != int(voting_chat_id):
+        return False
+
+    try:
+        member = await query.bot.get_chat_member(
+            chat_id=int(voting_chat_id),
+            user_id=int(query.from_user.id),
+        )
+    except (TelegramBadRequest, TelegramForbiddenError):
+        return False
+
+    return _is_chat_member_status(member.status)
+
+
+def _format_manual_contact_alert(
+    application: dict,
+    user_row: dict | None,
+    *,
+    tg_missing: bool = False,
+) -> str:
+    # Build short contact summary for callback alert popup.
+    lines: list[str] = []
+    if tg_missing:
+        lines.append("Користувача немає в Telegram.")
+    lines.append("Контакт для ручної комунікації:")
+
+    tg_user_id = application.get("tg_user_id")
+    if tg_user_id is not None:
+        username = (user_row or {}).get("username")
+        if isinstance(username, str) and username.strip():
+            lines.append(f"Telegram: @{username.strip()}")
+        else:
+            lines.append(f"Telegram ID: {int(tg_user_id)}")
+
+    phone = application.get("contact_phone")
+    if isinstance(phone, str) and phone.strip():
+        lines.append(f"Телефон: {phone.strip()}")
+
+    email = application.get("contact_email")
+    if isinstance(email, str) and email.strip():
+        lines.append(f"Email: {email.strip()}")
+
+    if len(lines) == 1:
+        lines.append("Дані контакту не вказані.")
+
+    alert_text = "\n".join(lines)
+    return alert_text[:200]
+
+
+def _build_telegram_contact_url(
+    application: dict,
+    user_row: dict | None,
+) -> str | None:
+    # Build direct Telegram contact URL when account is linked.
+    tg_user_id = application.get("tg_user_id")
+    if tg_user_id is None:
+        return None
+
+    username = (user_row or {}).get("username")
+    if isinstance(username, str) and username.strip():
+        cleaned = username.strip().lstrip("@")
+        if cleaned:
+            return f"https://t.me/{cleaned}"
+
+    try:
+        return f"tg://user?id={int(tg_user_id)}"
+    except (TypeError, ValueError):
+        return None
 
 
 @admin_applications_router.callback_query(ApplicationVoteCallbackData.filter())
@@ -41,14 +126,14 @@ async def handle_application_vote_callback(
     repo: PostgresRepo,
     config: Config,
 ) -> None:
-    # Accept admin vote, persist it, and refresh inline counters.
+    # Accept voting-group member vote, persist it, and refresh inline counters.
     if query.from_user is None:
         await query.answer()
         return
 
-    if not _is_admin(config, query.from_user.id):
+    if not await _can_vote_in_voting_chat(query, config):
         await query.answer(
-            "Голосувати можуть лише адміністратори.",
+            "Голосувати можуть лише учасники групи голосування.",
             show_alert=True,
         )
         return
@@ -71,7 +156,7 @@ async def handle_application_vote_callback(
         return
 
     if cast_status in {VOTE_CAST_CLOSED, VOTE_CAST_EXPIRED}:
-        await query.answer("Голосування вже закрито.", show_alert=True)
+        await query.answer("Голосування вже завершено.", show_alert=True)
         if cast_status == VOTE_CAST_EXPIRED:
             await close_due_votes(
                 bot=query.bot,
@@ -93,6 +178,7 @@ async def handle_application_vote_callback(
 
         await refresh_vote_message_markup(
             bot=query.bot,
+            repo=repo,
             application_row=application_row,
         )
         await query.answer("Ваш голос зараховано.")
@@ -101,11 +187,64 @@ async def handle_application_vote_callback(
     await query.answer("Не вдалося обробити голос.", show_alert=True)
 
 
+@admin_applications_router.callback_query(ApplicationVoteContactCallbackData.filter())
+async def handle_application_manual_contact_callback(
+    query: CallbackQuery,
+    callback_data: ApplicationVoteContactCallbackData,
+    repo: PostgresRepo,
+    config: Config,
+) -> None:
+    # Show manual contact data from application/user records.
+    if not await _can_vote_in_voting_chat(query, config):
+        await query.answer(
+            "Кнопка доступна лише для учасників групи голосування.",
+            show_alert=True,
+        )
+        return
+
+    application = await repo.get_application_by_id(callback_data.application_id)
+    if not application:
+        await query.answer("Заявку не знайдено.", show_alert=True)
+        return
+
+    tg_user_id = application.get("tg_user_id")
+    if tg_user_id is None:
+        matched_tg_user_id = await repo.find_linked_tg_user_id_by_contacts(
+            contact_phone=application.get("contact_phone"),
+            contact_email=application.get("contact_email"),
+        )
+        if matched_tg_user_id is not None:
+            tg_user_id = matched_tg_user_id
+            application = dict(application)
+            application["tg_user_id"] = matched_tg_user_id
+
+    user_row = None
+    if tg_user_id is not None:
+        user_row = await repo.get_user_by_tg_user_id(int(tg_user_id))
+
+    contact_url = _build_telegram_contact_url(application=application, user_row=user_row)
+    if contact_url:
+        try:
+            await query.answer(url=contact_url)
+            return
+        except TelegramBadRequest:
+            pass
+
+    await query.answer(
+        _format_manual_contact_alert(
+            application=application,
+            user_row=user_row,
+            tg_missing=tg_user_id is None,
+        ),
+        show_alert=True,
+    )
+
+
 @admin_applications_router.callback_query(F.data.startswith("admin_application_"))
 @admin_applications_router.callback_query(F.data.startswith("admin_unlinked_"))
 async def admin_legacy_application_callbacks(query: CallbackQuery) -> None:
     # Keep old disabled callback namespace explicit for backward compatibility.
     await query.answer(
-        "Застарілий тип кнопок. Використовуйте актуальне голосування в повідомленні заявки.",
+        "Застарілий формат кнопок. Використовуйте активні кнопки голосування у повідомленні заявки.",
         show_alert=True,
     )

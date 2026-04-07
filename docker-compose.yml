@@ -46,7 +46,7 @@ services:
       WEBHOOK_HOST: 0.0.0.0
       WEBHOOK_PORT: 8080
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
     depends_on:
       pg_database:
         condition: service_healthy
@@ -74,7 +74,7 @@ services:
     image: postgres:16-alpine
     restart: always
     ports:
-      - "5439:5432"
+      - "127.0.0.1:5439:5432"
     environment:
       POSTGRES_DB: ${DB_NAME:-bot}
       POSTGRES_USER: ${DB_USER:-postgres}
