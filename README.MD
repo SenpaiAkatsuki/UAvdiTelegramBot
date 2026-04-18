@@ -95,10 +95,63 @@ Compose services:
 - `weblium_app`
 - `pg_database`
 - `pg_backup` (automatic compressed Postgres dumps)
-- `adminer` (`127.0.0.1:8081`)
+- `adminer` (`127.0.0.1:8081`, local-only by default, Hydra-themed UI)
+- `pgweb` (`127.0.0.1:8082`, pre-connected simple PostgreSQL panel)
+- `cloudbeaver` (`127.0.0.1:8083`, modern DB UI panel)
 
 Start:
 - `docker compose up -d --build`
+
+### Client DB Panel (Adminer via Domain)
+
+For current production client instructions, see `docs/DB_PANEL.md`.
+
+By default, Adminer is not public (`127.0.0.1:8081` only).
+To provide global client access (phone/PC/any country), publish it through Nginx with password protection.
+
+1. Keep compose as-is (do not expose `8081` to `0.0.0.0`).
+2. Use template in `nginx/nginx.conf` (contains `/adminer/` route).
+3. Create Basic Auth credentials on server:
+   - `sudo apt-get install -y apache2-utils`
+   - `sudo htpasswd -c /etc/nginx/.htpasswd client_admin`
+4. Reload Nginx:
+   - `sudo nginx -t && sudo systemctl reload nginx`
+5. Open panel:
+   - `https://api.uavdi.com.ua/adminer/`
+
+Alternative client-friendly panel:
+- `https://api.uavdi.com.ua/db/`
+- `https://api.uavdi.com.ua/cloudbeaver/`
+
+Create a dedicated DB user for client access (recommended, do not use `postgres`):
+
+```sql
+-- run inside PostgreSQL as admin user
+CREATE ROLE client_panel LOGIN PASSWORD 'STRONG_PASSWORD_HERE';
+GRANT CONNECT ON DATABASE bot TO client_panel;
+GRANT USAGE ON SCHEMA public TO client_panel;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO client_panel;
+GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA public TO client_panel;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public
+    GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO client_panel;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public
+    GRANT USAGE, SELECT, UPDATE ON SEQUENCES TO client_panel;
+```
+
+Adminer login values:
+- System: `PostgreSQL`
+- Server: `pg_database`
+- Username: `client_panel` (or another dedicated client user)
+- Password: password of that user
+- Database: `bot`
+
+Security note:
+- Anyone with this panel login can modify production data.
+- Keep password strong and share only with trusted client admins.
+- Prefer rotating both passwords periodically:
+  - Nginx Basic Auth (`.htpasswd`)
+  - PostgreSQL client role password
+
 
 ### Automatic DB Backups (Compose)
 

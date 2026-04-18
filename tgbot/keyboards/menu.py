@@ -10,14 +10,28 @@ from tgbot.callbacks.menu import (
     SCOPE_ADMIN,
     SCOPE_USER,
     VIEW_ADMIN_ACTIVE,
+    VIEW_ADMIN_ADD_ADMIN,
     VIEW_ADMIN_APPROVE_PENDING,
     VIEW_ADMIN_EXPIRED,
+    VIEW_ADMIN_LIBRARY_ADD_ARTICLE,
+    VIEW_ADMIN_LIBRARY_ADD_TOPIC,
+    VIEW_ADMIN_LIBRARY_ARTICLE,
+    VIEW_ADMIN_LIBRARY_ARTICLES,
+    VIEW_ADMIN_LIBRARY_DELETE_ARTICLE,
+    VIEW_ADMIN_LIBRARY_DELETE_TOPIC,
+    VIEW_ADMIN_LIBRARY_EDIT_ARTICLE,
+    VIEW_ADMIN_LIBRARY_EDIT_TOPIC,
+    VIEW_ADMIN_LIBRARY_TOPICS,
     VIEW_ADMIN_MANAGEMENT,
     VIEW_ADMIN_PENDING,
     VIEW_ADMIN_ROOT,
     VIEW_ADMIN_SUBSCRIPTION_PRICE,
     VIEW_ADMIN_USER_DETAIL,
     VIEW_ADMIN_VOTING_SETTINGS,
+    VIEW_ADMIN_BROADCAST,
+    VIEW_LIBRARY_ARTICLE,
+    VIEW_LIBRARY_ARTICLES,
+    VIEW_LIBRARY_TOPICS,
     VIEW_PROFILE,
     VIEW_USER_ROOT,
 )
@@ -61,6 +75,10 @@ def user_root_keyboard(is_admin: bool) -> InlineKeyboardMarkup:
     keyboard.button(
         text="👤 Профіль",
         callback_data=MenuCallbackData(scope=SCOPE_USER, view=VIEW_PROFILE),
+    )
+    keyboard.button(
+        text="📚 Бібліотека",
+        callback_data=MenuCallbackData(scope=SCOPE_USER, view=VIEW_LIBRARY_TOPICS, page=0),
     )
     if is_admin:
         keyboard.button(
@@ -108,7 +126,15 @@ def admin_root_keyboard() -> InlineKeyboardMarkup:
         text="🧭 Керування",
         callback_data=MenuCallbackData(scope=SCOPE_ADMIN, view=VIEW_ADMIN_MANAGEMENT),
     )
-    keyboard.adjust(2)
+    keyboard.button(
+        text="📚 Редагування бібліотеки",
+        callback_data=MenuCallbackData(
+            scope=SCOPE_ADMIN,
+            view=VIEW_ADMIN_LIBRARY_TOPICS,
+            page=0,
+        ),
+    )
+    keyboard.adjust(2, 1)
     return keyboard.as_markup()
 
 
@@ -142,10 +168,66 @@ def admin_management_keyboard() -> InlineKeyboardMarkup:
         ),
     )
     keyboard.button(
+        text="➕ Додати адміністратора",
+        callback_data=MenuCallbackData(
+            scope=SCOPE_ADMIN,
+            view=VIEW_ADMIN_ADD_ADMIN,
+        ),
+    )
+    keyboard.button(
+        text="📣 Розсилка учасникам",
+        callback_data=MenuCallbackData(
+            scope=SCOPE_ADMIN,
+            view=VIEW_ADMIN_BROADCAST,
+        ),
+    )
+    keyboard.button(
         text="⬅️ Назад",
         callback_data=MenuCallbackData(scope=SCOPE_ADMIN, view=VIEW_ADMIN_ROOT),
     )
-    keyboard.adjust(1, 2, 2)
+    keyboard.adjust(1, 2, 2, 1, 1, 1)
+    return keyboard.as_markup()
+
+
+def admin_add_admin_keyboard(*, input_mode: str = "") -> InlineKeyboardMarkup:
+    # Inline actions for admin grant flow. In input mode show only back to methods.
+    keyboard = InlineKeyboardBuilder()
+    if input_mode in {"contact", "id"}:
+        keyboard.button(
+            text="⬅️ Назад до способів",
+            callback_data=MenuCallbackData(
+                scope=SCOPE_ADMIN,
+                view=VIEW_ADMIN_ADD_ADMIN,
+                back_view="menu",
+            ),
+        )
+        keyboard.adjust(1)
+        return keyboard.as_markup()
+
+    keyboard.button(
+        text="📇 Надіслати контакт",
+        callback_data=MenuCallbackData(
+            scope=SCOPE_ADMIN,
+            view=VIEW_ADMIN_ADD_ADMIN,
+            back_view="contact",
+        ),
+    )
+    keyboard.button(
+        text="🆔 Додати за ID",
+        callback_data=MenuCallbackData(
+            scope=SCOPE_ADMIN,
+            view=VIEW_ADMIN_ADD_ADMIN,
+            back_view="id",
+        ),
+    )
+    keyboard.button(
+        text="⬅️ Назад",
+        callback_data=MenuCallbackData(
+            scope=SCOPE_ADMIN,
+            view=VIEW_ADMIN_MANAGEMENT,
+        ),
+    )
+    keyboard.adjust(1, 1, 1)
     return keyboard.as_markup()
 
 
@@ -309,3 +391,353 @@ def admin_denied_keyboard() -> InlineKeyboardMarkup:
     )
     keyboard.adjust(1)
     return keyboard.as_markup()
+
+
+def safe_topic_label(topic: dict) -> str:
+    # Compact topic title for inline buttons.
+    title = _safe_library_title(
+        raw_title=topic.get("title"),
+        fallback="Example",
+    )
+    return (title[:26] + "...") if len(title) > 29 else title
+
+
+def safe_article_label(article: dict) -> str:
+    # Compact article title for inline buttons.
+    title = _safe_library_title(
+        raw_title=article.get("title"),
+        fallback="Example",
+    )
+    return (title[:26] + "...") if len(title) > 29 else title
+
+
+def _safe_library_title(*, raw_title: object, fallback: str) -> str:
+    # Replace broken placeholder titles like "???" with readable fallback.
+    title = " ".join(str(raw_title or "").split()).strip()
+    if not title:
+        return fallback
+    if title.startswith("Example ") and title[len("Example ") :].isdigit():
+        return "Example"
+
+    marker = (
+        title.replace("?", "")
+        .replace("�", "")
+        .replace("0", "")
+        .replace("1", "")
+        .replace("2", "")
+        .replace("3", "")
+        .replace("4", "")
+        .replace("5", "")
+        .replace("6", "")
+        .replace("7", "")
+        .replace("8", "")
+        .replace("9", "")
+        .replace(".", "")
+        .replace("-", "")
+        .replace("_", "")
+        .strip()
+    )
+    if not marker:
+        return fallback
+    return title
+
+
+def append_two_column_rows(
+    rows: list[list[InlineKeyboardButton]],
+    buttons: Sequence[InlineKeyboardButton],
+) -> None:
+    # Append inline buttons as 2-column rows.
+    current_row: list[InlineKeyboardButton] = []
+    for button in buttons:
+        current_row.append(button)
+        if len(current_row) == 2:
+            rows.append(current_row)
+            current_row = []
+    if current_row:
+        rows.append(current_row)
+
+
+def library_topics_keyboard(
+    *,
+    topics: Sequence[dict],
+    scope: str,
+    page: int,
+    has_prev: bool,
+    has_next: bool,
+    is_admin: bool,
+) -> InlineKeyboardMarkup:
+    # Topics list with pagination and scope-specific controls.
+    rows: list[list[InlineKeyboardButton]] = []
+    list_view = VIEW_ADMIN_LIBRARY_TOPICS if is_admin else VIEW_LIBRARY_TOPICS
+    article_view = VIEW_ADMIN_LIBRARY_ARTICLES if is_admin else VIEW_LIBRARY_ARTICLES
+
+    topic_buttons: list[InlineKeyboardButton] = []
+    for topic in topics:
+        topic_id = int(topic["id"])
+        topic_buttons.append(
+            InlineKeyboardButton(
+                text=safe_topic_label(topic),
+                callback_data=MenuCallbackData(
+                    scope=scope,
+                    view=article_view,
+                    target_user_id=topic_id,
+                    page=0,
+                    back_view=str(max(page, 0)),
+                ).pack(),
+            )
+        )
+    append_two_column_rows(rows, topic_buttons)
+
+    nav_row: list[InlineKeyboardButton] = []
+    if has_prev:
+        nav_row.append(
+            InlineKeyboardButton(
+                text="⬅️ Назад",
+                callback_data=MenuCallbackData(
+                    scope=scope,
+                    view=list_view,
+                    page=max(page - 1, 0),
+                ).pack(),
+            )
+        )
+    if has_next:
+        nav_row.append(
+            InlineKeyboardButton(
+                text="Далі ➡️",
+                callback_data=MenuCallbackData(
+                    scope=scope,
+                    view=list_view,
+                    page=page + 1,
+                ).pack(),
+            )
+        )
+    if nav_row:
+        rows.append(nav_row)
+
+    if is_admin:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="➕ Додати тему",
+                    callback_data=MenuCallbackData(
+                        scope=SCOPE_ADMIN,
+                        view=VIEW_ADMIN_LIBRARY_ADD_TOPIC,
+                        page=page,
+                    ).pack(),
+                )
+            ]
+        )
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="⬅️ Назад",
+                    callback_data=MenuCallbackData(
+                        scope=SCOPE_ADMIN,
+                        view=VIEW_ADMIN_MANAGEMENT,
+                    ).pack(),
+                )
+            ]
+        )
+    else:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="⬅️ Меню",
+                    callback_data=MenuCallbackData(
+                        scope=SCOPE_USER,
+                        view=VIEW_USER_ROOT,
+                    ).pack(),
+                )
+            ]
+        )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def library_articles_keyboard(
+    *,
+    articles: Sequence[dict],
+    scope: str,
+    topic_id: int,
+    topic_page: int,
+    page: int,
+    has_prev: bool,
+    has_next: bool,
+    is_admin: bool,
+) -> InlineKeyboardMarkup:
+    # Articles list for selected topic with pagination and admin actions.
+    rows: list[list[InlineKeyboardButton]] = []
+    list_view = VIEW_ADMIN_LIBRARY_ARTICLES if is_admin else VIEW_LIBRARY_ARTICLES
+    article_view = VIEW_ADMIN_LIBRARY_ARTICLE if is_admin else VIEW_LIBRARY_ARTICLE
+    back_payload = f"{topic_id}|{max(topic_page, 0)}"
+
+    article_buttons: list[InlineKeyboardButton] = []
+    for article in articles:
+        article_id = int(article["id"])
+        article_buttons.append(
+            InlineKeyboardButton(
+                text=safe_article_label(article),
+                callback_data=MenuCallbackData(
+                    scope=scope,
+                    view=article_view,
+                    target_user_id=article_id,
+                    page=max(page, 0),
+                    back_view=back_payload,
+                ).pack(),
+            )
+        )
+    append_two_column_rows(rows, article_buttons)
+
+    if is_admin:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="➕ Додати статтю",
+                    callback_data=MenuCallbackData(
+                        scope=SCOPE_ADMIN,
+                        view=VIEW_ADMIN_LIBRARY_ADD_ARTICLE,
+                        target_user_id=topic_id,
+                        page=max(page, 0),
+                        back_view=str(max(topic_page, 0)),
+                    ).pack(),
+                )
+            ]
+        )
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="✏️ Тему",
+                    callback_data=MenuCallbackData(
+                        scope=SCOPE_ADMIN,
+                        view=VIEW_ADMIN_LIBRARY_EDIT_TOPIC,
+                        target_user_id=topic_id,
+                        page=max(page, 0),
+                        back_view=str(max(topic_page, 0)),
+                    ).pack(),
+                ),
+                InlineKeyboardButton(
+                    text="🗑️ Тему",
+                    callback_data=MenuCallbackData(
+                        scope=SCOPE_ADMIN,
+                        view=VIEW_ADMIN_LIBRARY_DELETE_TOPIC,
+                        target_user_id=topic_id,
+                        page=max(page, 0),
+                        back_view=str(max(topic_page, 0)),
+                    ).pack(),
+                ),
+            ]
+        )
+
+    nav_row: list[InlineKeyboardButton] = []
+    if has_prev:
+        nav_row.append(
+            InlineKeyboardButton(
+                text="⬅️ Назад",
+                callback_data=MenuCallbackData(
+                    scope=scope,
+                    view=list_view,
+                    target_user_id=topic_id,
+                    page=max(page - 1, 0),
+                    back_view=str(max(topic_page, 0)),
+                ).pack(),
+            )
+        )
+    if has_next:
+        nav_row.append(
+            InlineKeyboardButton(
+                text="Далі ➡️",
+                callback_data=MenuCallbackData(
+                    scope=scope,
+                    view=list_view,
+                    target_user_id=topic_id,
+                    page=page + 1,
+                    back_view=str(max(topic_page, 0)),
+                ).pack(),
+            )
+        )
+    if nav_row:
+        rows.append(nav_row)
+
+    if is_admin:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="⬅️ Назад",
+                    callback_data=MenuCallbackData(
+                        scope=scope,
+                        view=VIEW_ADMIN_LIBRARY_TOPICS,
+                        page=max(topic_page, 0),
+                    ).pack(),
+                )
+            ]
+        )
+    else:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="⬅️ Меню",
+                    callback_data=MenuCallbackData(
+                        scope=SCOPE_USER,
+                        view=VIEW_USER_ROOT,
+                    ).pack(),
+                )
+            ]
+        )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def library_article_keyboard(
+    *,
+    scope: str,
+    topic_id: int,
+    topic_page: int,
+    article_id: int,
+    article_page: int,
+    is_admin: bool,
+) -> InlineKeyboardMarkup:
+    # Article detail keyboard for user/admin actions.
+    rows: list[list[InlineKeyboardButton]] = []
+    if is_admin:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="✏️ Редагувати статтю",
+                    callback_data=MenuCallbackData(
+                        scope=SCOPE_ADMIN,
+                        view=VIEW_ADMIN_LIBRARY_EDIT_ARTICLE,
+                        target_user_id=article_id,
+                        page=max(article_page, 0),
+                        back_view=f"{topic_id}|{max(topic_page, 0)}",
+                    ).pack(),
+                )
+            ]
+        )
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="🗑️ Видалити статтю",
+                    callback_data=MenuCallbackData(
+                        scope=SCOPE_ADMIN,
+                        view=VIEW_ADMIN_LIBRARY_DELETE_ARTICLE,
+                        target_user_id=article_id,
+                        page=max(article_page, 0),
+                        back_view=f"{topic_id}|{max(topic_page, 0)}",
+                    ).pack(),
+                )
+            ]
+        )
+
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="⬅️ Назад",
+                callback_data=MenuCallbackData(
+                    scope=scope,
+                    view=VIEW_ADMIN_LIBRARY_ARTICLES if is_admin else VIEW_LIBRARY_ARTICLES,
+                    target_user_id=topic_id,
+                    page=max(article_page, 0),
+                    back_view=str(max(topic_page, 0)),
+                ).pack(),
+            )
+        ]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)

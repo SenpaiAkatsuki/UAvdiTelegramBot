@@ -19,10 +19,12 @@ def application_vote_keyboard(
     yes_count: int,
     no_count: int,
     include_vote_buttons: bool = True,
+    include_manual_contact_button: bool = True,
     contact_url: str | None = None,
 ) -> InlineKeyboardMarkup:
-    # Build inline voting keyboard with counters and manual-contact helper.
+    # Build inline voting keyboard with counters and optional manual-contact helper.
     rows: list[list[InlineKeyboardButton]] = []
+
     if include_vote_buttons:
         rows.append(
             [
@@ -43,22 +45,23 @@ def application_vote_keyboard(
             ]
         )
 
-    rows.append(
-        [
-            (
-                InlineKeyboardButton(
-                    text="📞 Зв’язатися вручну",
-                    url=contact_url,
+    if include_manual_contact_button:
+        rows.append(
+            [
+                (
+                    InlineKeyboardButton(
+                        text="📞 Зв’язатися вручну",
+                        url=contact_url,
+                    )
+                    if contact_url
+                    else InlineKeyboardButton(
+                        text="📞 Зв’язатися вручну",
+                        callback_data=ApplicationVoteContactCallbackData(
+                            application_id=application_id,
+                        ).pack(),
+                    )
                 )
-                if contact_url
-                else InlineKeyboardButton(
-                    text="📞 Зв’язатися вручну",
-                    callback_data=ApplicationVoteContactCallbackData(
-                        application_id=application_id,
-                    ).pack(),
-                )
-            )
-        ]
-    )
+            ]
+        )
 
     return InlineKeyboardMarkup(inline_keyboard=rows)

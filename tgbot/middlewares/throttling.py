@@ -29,6 +29,8 @@ class ThrottlingMiddleware(BaseMiddleware):
         # Store throttling config and in-memory hit buckets.
         self._cfg = throttling
         self._hits: dict[tuple[int, str], list[float]] = {}
+        self._admin_cache: dict[int, tuple[bool, float]] = {}
+        self._admin_cache_ttl_seconds = 60.0
         self._cleanup_every = 500
         self._calls = 0
 
@@ -85,9 +87,8 @@ class ThrottlingMiddleware(BaseMiddleware):
             return "heavy_callback", self._cfg.heavy_callback_max_events
         return "callback", self._cfg.callback_max_events
 
-    @staticmethod
-    def _is_admin_user(data: dict[str, Any], user_id: int) -> bool:
-        # Skip throttling for configured admins.
+    async def _is_admin_user(self, data: dict[str, Any], user_id: int) -> bool:
+        # Skip throttling for configured admins and runtime DB admins.
         config = data.get("config")
         if config is None:
             return False
@@ -95,7 +96,27 @@ class ThrottlingMiddleware(BaseMiddleware):
             admin_ids = config.tg_bot.admin_ids
         except Exception:  # noqa: BLE001
             return False
-        return user_id in admin_ids
+        if user_id in admin_ids:
+            return True
+
+        now = time.monotonic()
+        cached = self._admin_cache.get(user_id)
+        if cached is not None:
+            cached_value, cached_at = cached
+            if now - cached_at <= self._admin_cache_ttl_seconds:
+                return cached_value
+
+        repo = data.get("repo")
+        if repo is None:
+            self._admin_cache[user_id] = (False, now)
+            return False
+
+        try:
+            resolved = await repo.is_bot_admin(int(user_id))
+        except Exception:  # noqa: BLE001
+            resolved = False
+        self._admin_cache[user_id] = (resolved, now)
+        return resolved
 
     async def __call__(
         self,
@@ -111,7 +132,7 @@ class ThrottlingMiddleware(BaseMiddleware):
             from_user = event.from_user
             if from_user is None:
                 return await handler(event, data)
-            if self._is_admin_user(data, from_user.id):
+            if await self._is_admin_user(data, from_user.id):
                 return await handler(event, data)
             bucket, max_events = self._classify_message(event)
             if max_events > 0:
@@ -135,7 +156,7 @@ class ThrottlingMiddleware(BaseMiddleware):
             from_user = event.from_user
             if from_user is None:
                 return await handler(event, data)
-            if self._is_admin_user(data, from_user.id):
+            if await self._is_admin_user(data, from_user.id):
                 return await handler(event, data)
             bucket, max_events = self._classify_callback(event)
             if max_events > 0:

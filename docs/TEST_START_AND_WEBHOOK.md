@@ -17,8 +17,8 @@ DB_USER=postgres
 DB_PASSWORD=postgres
 DB_NAME=bot
 
-MEMBERSHIP_APPLICATION_URL=https://uavdi.com.ua/#contact-form
-MEMBERSHIP_APPLICATION_LINK_BASE_URL=https://uavdi.com.ua/#contact-form
+MEMBERSHIP_APPLICATION_URL=https://uavdi.com.ua/#contact-form-mobile
+MEMBERSHIP_APPLICATION_LINK_BASE_URL=https://uavdi.com.ua/#contact-form-mobile
 MEMBERSHIP_FALLBACK_MANUAL_SUBMIT_ENABLED=true
 
 WEBHOOK_ENABLED=true

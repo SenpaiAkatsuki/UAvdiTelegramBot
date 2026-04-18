@@ -466,11 +466,10 @@ class VotingConfig:
 
     def validate(self, membership_chat_id: int) -> None:
         # Validate voting config constraints.
-        if self.chat_id == 0:
-            raise ValueError("VOTING_CHAT_ID must be configured")
         if (
-            not self.allow_shared_chat
+            self.chat_id != 0
             and membership_chat_id != 0
+            and not self.allow_shared_chat
             and self.chat_id == membership_chat_id
         ):
             raise ValueError(
