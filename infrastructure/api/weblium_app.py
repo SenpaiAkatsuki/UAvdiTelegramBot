@@ -29,6 +29,7 @@ from tgbot.services.application_voting import (
     build_application_vote_text,
     start_vote,
 )
+from tgbot.services.chat_config_sync import load_runtime_chat_overrides
 from tgbot.services.notify import notify_user
 
 """
@@ -286,9 +287,21 @@ def _liqpay_signature(private_key: str, data: str) -> str:
     return base64.b64encode(digest).decode("utf-8")
 
 
+def _build_liqpay_description(payment_id: Any, payer_name: str | None) -> str:
+    # Keep checkout description short and readable for LiqPay UI.
+    normalized_name = _as_string(payer_name)
+    if normalized_name:
+        collapsed_name = " ".join(normalized_name.split())
+        if len(collapsed_name) > 80:
+            collapsed_name = f"{collapsed_name[:77]}..."
+        return f"UAVDI membership payment ({collapsed_name})"
+    return f"UAVDI membership payment #{payment_id}"
+
+
 def _build_liqpay_checkout_payload(
     config: Config,
     payment: Mapping[str, Any],
+    payer_name: str | None = None,
 ) -> dict[str, Any]:
     provider_order_id = _as_string(payment.get("provider_order_id"))
     if not provider_order_id:
@@ -300,7 +313,7 @@ def _build_liqpay_checkout_payload(
         "action": "pay",
         "amount": _amount_major_string(int(payment["amount_minor"])),
         "currency": str(payment["currency"]).upper(),
-        "description": f"UAVDI membership payment #{payment['id']}",
+        "description": _build_liqpay_description(payment.get("id"), payer_name),
         "order_id": provider_order_id,
         "server_url": config.liqpay.callback_url(),
     }
@@ -445,6 +458,7 @@ async def weblium_application_webhook(request: web.Request) -> web.Response:
     config: Config = request.app["config"]
     repo: PostgresRepo = request.app["repo"]
     bot: Bot = request.app["bot"]
+    await load_runtime_chat_overrides(repo=repo, config=config)
 
     if not _is_content_type_valid(request):
         return web.json_response(
@@ -656,14 +670,29 @@ async def liqpay_pay_page(request: web.Request) -> web.Response:
     payment_status = str(payment.get("status"))
     if payment_status == "PAID":
         return web.Response(
-            text="<html><body><p>Payment is already confirmed.</p></body></html>",
+            text="<html><body><p>Оплату вже підтверджено.</p></body></html>",
             content_type="text/html",
         )
     if payment_status != "PENDING":
         return web.Response(status=400, text="payment is not active")
 
+    payer_name: str | None = None
+    application_id = payment.get("application_id")
+    if isinstance(application_id, int):
+        application = await repo.get_application_by_id(application_id)
+        if application:
+            payer_name = _as_string(application.get("applicant_name"))
+            if not payer_name:
+                tg_user_id = application.get("tg_user_id")
+                if isinstance(tg_user_id, int):
+                    user = await repo.get_user_by_tg_user_id(tg_user_id)
+                    if user:
+                        payer_name = _as_string(user.get("full_name")) or _as_string(
+                            user.get("username")
+                        )
+
     try:
-        payload = _build_liqpay_checkout_payload(config, payment)
+        payload = _build_liqpay_checkout_payload(config, payment, payer_name=payer_name)
         data = _encode_liqpay_data(payload)
         signature = _liqpay_signature(config.liqpay.private_key, data)
     except ValueError as exc:
@@ -773,11 +802,11 @@ async def liqpay_callback_webhook(request: web.Request) -> web.Response:
                 bot=bot,
                 user_id=int(tg_user_id),
                 text=(
-                    "Payment confirmed. Your 365-day subscription is active.\n"
+                    "✅ Оплату підтверджено. Вашу підписку активовано на 365 днів.\n"
                     + (
-                        "You can now request group access."
+                        "🔐 Тепер можна отримати доступ до групи."
                         if show_group_access
-                        else "Your access is already active."
+                        else "✅ Ваш доступ до групи вже активний."
                     )
                 ),
                 reply_markup=group_access_keyboard() if show_group_access else None,
@@ -796,6 +825,7 @@ async def _on_startup(app: web.Application) -> None:
     pool = await init_db(config)
     app["db_pool"] = pool
     app["repo"] = PostgresRepo(pool)
+    await load_runtime_chat_overrides(repo=app["repo"], config=config)
     app["bot"] = Bot(
         token=config.tg_bot.token,
         default=DefaultBotProperties(parse_mode="HTML"),

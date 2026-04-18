@@ -356,6 +356,8 @@ class WebhookConfig:
     port: int
     weblium_path: str
     weblium_secret: str
+    signature_secret: str
+    signature_header: str
     trusted_proxy_ips: list[str]
     webhook_enabled: bool
 
@@ -371,6 +373,12 @@ class WebhookConfig:
                 "/webhooks/weblium/application",
             ),
             weblium_secret=env.str("WEBHOOK_WEBLIUM_SECRET", ""),
+            signature_secret=env.str("WEBHOOK_SIGNATURE_SECRET", "").strip(),
+            signature_header=_env_non_empty_or_default(
+                env,
+                "WEBHOOK_SIGNATURE_HEADER",
+                "X-Webhook-Signature",
+            ),
             trusted_proxy_ips=env.list(
                 "WEBHOOK_TRUSTED_PROXY_IPS",
                 subcast=str,
@@ -402,6 +410,10 @@ class WebhookConfig:
         if not self.weblium_secret.strip():
             errors.append(
                 "WEBHOOK_WEBLIUM_SECRET must not be empty when WEBHOOK_ENABLED=true"
+            )
+        if self.signature_secret and not self.signature_header.strip():
+            errors.append(
+                "WEBHOOK_SIGNATURE_HEADER must not be empty when WEBHOOK_SIGNATURE_SECRET is set"
             )
 
         for idx, value in enumerate(self.trusted_proxy_ips):
@@ -454,11 +466,10 @@ class VotingConfig:
 
     def validate(self, membership_chat_id: int) -> None:
         # Validate voting config constraints.
-        if self.chat_id == 0:
-            raise ValueError("VOTING_CHAT_ID must be configured")
         if (
-            not self.allow_shared_chat
+            self.chat_id != 0
             and membership_chat_id != 0
+            and not self.allow_shared_chat
             and self.chat_id == membership_chat_id
         ):
             raise ValueError(

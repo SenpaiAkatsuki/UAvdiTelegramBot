@@ -1,0 +1,14 @@
+{
+  "Servers": {
+    "1": {
+      "Name": "UAVDI PostgreSQL",
+      "Group": "UAVDI",
+      "Host": "pg_database",
+      "Port": 5432,
+      "MaintenanceDB": "bot",
+      "Username": "postgres",
+      "SSLMode": "prefer",
+      "Shared": true
+    }
+  }
+}

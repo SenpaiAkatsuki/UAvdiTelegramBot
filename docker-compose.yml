@@ -57,13 +57,58 @@ services:
         max-file: "10"
 
   adminer:
-    image: adminer:4-standalone
+    image: isma97p/adminer-hydra:latest
+    restart: always
+    depends_on:
+      pg_database:
+        condition: service_healthy
+    environment:
+      ADMINER_DESIGN: simple-theme
+    ports:
+      - "127.0.0.1:8082:8080"
+    volumes:
+      - ./infrastructure/adminer/theme/simple-theme/adminer.css:/var/www/html/designs/simple-theme/adminer.css:ro
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "200k"
+        max-file: "10"
+
+  nocodb:
+    image: nocodb/nocodb:0.265.1
     restart: always
     depends_on:
       pg_database:
         condition: service_healthy
     ports:
-      - "127.0.0.1:8081:8080"
+      - "127.0.0.1:8086:8080"
+    volumes:
+      - nocodb_data:/usr/app/data
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "200k"
+        max-file: "10"
+
+  pgadmin:
+    image: dpage/pgadmin4:8.14
+    restart: always
+    depends_on:
+      pg_database:
+        condition: service_healthy
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_DEFAULT_EMAIL:-admin@uavdi.local}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_DEFAULT_PASSWORD:-546454}
+      PGADMIN_CONFIG_PROXY_X_FOR_COUNT: 1
+      PGADMIN_CONFIG_PROXY_X_PROTO_COUNT: 1
+      PGADMIN_CONFIG_PROXY_X_HOST_COUNT: 1
+      PGADMIN_CONFIG_ENHANCED_COOKIE_PROTECTION: "False"
+      PGADMIN_CONFIG_MASTER_PASSWORD_REQUIRED: "False"
+    ports:
+      - "127.0.0.1:8084:80"
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+      - ./infrastructure/pgadmin/servers.json:/pgadmin4/servers.json:ro
     logging:
       driver: "json-file"
       options:
@@ -143,3 +188,5 @@ services:
 volumes:
   pgdata: {}
   pgbackups: {}
+  pgadmin_data: {}
+  nocodb_data: {}

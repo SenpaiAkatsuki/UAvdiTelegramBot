@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from aiogram import F, Router
-from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramMigrateToChat
 from aiogram.types import CallbackQuery
 
 from tgbot.callbacks.voting import (
@@ -21,6 +23,8 @@ from tgbot.services.application_voting import (
     finalize_vote_if_target_reached,
     refresh_vote_message_markup,
 )
+from tgbot.services.chat_config_sync import resolve_voting_chat_id
+from tgbot.services.chat_config_sync import RUNTIME_VOTING_CHAT_ID_KEY
 
 """
 Application voting callbacks.
@@ -39,12 +43,17 @@ def _is_chat_member_status(status: str) -> bool:
 async def _can_vote_in_voting_chat(
     query: CallbackQuery,
     config: Config,
+    repo: PostgresRepo,
 ) -> bool:
     # Allow voting only from members of configured voting group.
     if query.from_user is None or query.message is None:
         return False
 
-    voting_chat_id = config.voting.chat_id
+    voting_chat_id = await resolve_voting_chat_id(
+        bot=query.bot,
+        config=config,
+        repo=repo,
+    )
     if voting_chat_id is None:
         return False
 
@@ -52,15 +61,56 @@ async def _can_vote_in_voting_chat(
     if int(message_chat.id) != int(voting_chat_id):
         return False
 
+    user_id = int(query.from_user.id)
+
     try:
         member = await query.bot.get_chat_member(
             chat_id=int(voting_chat_id),
-            user_id=int(query.from_user.id),
+            user_id=user_id,
         )
+    except TelegramMigrateToChat as exc:
+        config.voting.chat_id = int(exc.migrate_to_chat_id)
+        await repo.set_setting(
+            RUNTIME_VOTING_CHAT_ID_KEY,
+            str(config.voting.chat_id),
+        )
+        try:
+            member = await query.bot.get_chat_member(
+                chat_id=int(config.voting.chat_id),
+                user_id=user_id,
+            )
+        except (TelegramBadRequest, TelegramForbiddenError):
+            return False
     except (TelegramBadRequest, TelegramForbiddenError):
         return False
 
-    return _is_chat_member_status(member.status)
+    is_active = _is_chat_member_status(str(member.status))
+    if is_active:
+        await repo.upsert_voting_member(
+            tg_user_id=user_id,
+            username=query.from_user.username,
+            full_name=query.from_user.full_name,
+            language_code=query.from_user.language_code,
+            member_status="ACTIVE",
+            verified_at=datetime.now(timezone.utc),
+        )
+        return True
+
+    updated = await repo.set_voting_member_status(
+        tg_user_id=user_id,
+        member_status="LEFT",
+        clear_admin=False,
+    )
+    if updated is None:
+        await repo.upsert_voting_member(
+            tg_user_id=user_id,
+            username=query.from_user.username,
+            full_name=query.from_user.full_name,
+            language_code=query.from_user.language_code,
+            member_status="LEFT",
+            verified_at=datetime.now(timezone.utc),
+        )
+    return False
 
 
 def _format_manual_contact_alert(
@@ -72,6 +122,8 @@ def _format_manual_contact_alert(
     # Build short contact summary for callback alert popup.
     lines: list[str] = []
     if tg_missing:
+        lines.append("Telegram-профіль за цією заявкою ще не прив'язано.")
+    if False and tg_missing:
         lines.append("Користувача немає в Telegram.")
     lines.append("Контакт для ручної комунікації:")
 
@@ -131,7 +183,7 @@ async def handle_application_vote_callback(
         await query.answer()
         return
 
-    if not await _can_vote_in_voting_chat(query, config):
+    if not await _can_vote_in_voting_chat(query, config, repo):
         await query.answer(
             "Голосувати можуть лише учасники групи голосування.",
             show_alert=True,
@@ -195,7 +247,7 @@ async def handle_application_manual_contact_callback(
     config: Config,
 ) -> None:
     # Show manual contact data from application/user records.
-    if not await _can_vote_in_voting_chat(query, config):
+    if not await _can_vote_in_voting_chat(query, config, repo):
         await query.answer(
             "Кнопка доступна лише для учасників групи голосування.",
             show_alert=True,

@@ -11,6 +11,8 @@ from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
 from tgbot.config import Config
 from tgbot.db.repo import PostgresRepo
 from tgbot.keyboards.membership import payment_keyboard
+from tgbot.services.admin_access import is_admin_user as is_effective_admin_user
+from tgbot.services.membership_access import has_payment_exemption
 from tgbot.services.notify import notify_user
 
 """
@@ -21,7 +23,7 @@ Sends renewal reminders and optionally enforces removal of expired members.
 
 logger = logging.getLogger(__name__)
 
-REMINDER_DAYS = (20, 10, 5)
+REMINDER_DAYS = (30, 7)
 REMINDER_LOOP_INTERVAL_SECONDS = 6 * 60 * 60
 REMOVABLE_CHAT_MEMBER_STATUSES = {
     ChatMemberStatus.MEMBER.value,
@@ -44,9 +46,18 @@ def _format_expiry(expires_at: datetime | None) -> str:
 def _build_reminder_text(days_left: int, expires_at: datetime | None) -> str:
     # Build reminder text for user notification.
     return (
-        f"Your membership expires in {days_left} day(s).\n"
-        f"Expires on: {_format_expiry(expires_at)}\n\n"
-        "Renew now to keep uninterrupted group access."
+        f"⏳ Ваша підписка завершиться через {days_left} дн.\n"
+        f"Дата завершення: {_format_expiry(expires_at)}\n\n"
+        "💳 Продовжіть підписку зараз, щоб зберегти безперервний доступ до групи."
+    )
+
+
+def _build_expired_removed_text(expires_at: datetime | None) -> str:
+    # Build notification text sent after expired user is removed from group.
+    return (
+        "⛔️ Вашу підписку завершено, тому доступ до групи тимчасово призупинено.\n"
+        f"Дата завершення: {_format_expiry(expires_at)}\n\n"
+        "💳 Щоб відновити доступ до бота та групи, продовжіть підписку кнопкою нижче."
     )
 
 
@@ -61,13 +72,19 @@ def _is_removable_chat_member(status: str | ChatMemberStatus | None) -> bool:
     return value in REMOVABLE_CHAT_MEMBER_STATUSES
 
 
-def _is_admin_user(config: Config, tg_user_id: int | None) -> bool:
-    # Skip enforcement/reminders for admin users.
+async def _is_admin_user(
+    config: Config,
+    repo: PostgresRepo,
+    tg_user_id: int | None,
+) -> bool:
+    # Skip enforcement/reminders for env/DB admins.
     if tg_user_id is None:
         return False
-    tg_bot = getattr(config, "tg_bot", None)
-    admin_ids = getattr(tg_bot, "admin_ids", [])
-    return int(tg_user_id) in admin_ids
+    return await is_effective_admin_user(
+        repo=repo,
+        config=config,
+        tg_user_id=int(tg_user_id),
+    )
 
 
 async def send_due_renewal_reminders(
@@ -75,7 +92,7 @@ async def send_due_renewal_reminders(
     config: Config,
     repo: PostgresRepo,
 ) -> int:
-    # Send reminders for users with 20/10/5 days left.
+    # Send reminders for users with 30/7 days left.
     if not config.payments.enabled:
         return 0
 
@@ -87,14 +104,21 @@ async def send_due_renewal_reminders(
             expires_at = user.get("subscription_expires_at")
             if tg_user_id is None or not isinstance(expires_at, datetime):
                 continue
-            if _is_admin_user(config, int(tg_user_id)):
+            if await _is_admin_user(config, repo, int(tg_user_id)):
+                continue
+            if await has_payment_exemption(
+                bot=bot,
+                config=config,
+                tg_user_id=int(tg_user_id),
+                repo=repo,
+            ):
                 continue
 
             delivered = await notify_user(
                 bot=bot,
                 user_id=int(tg_user_id),
                 text=_build_reminder_text(days_left=days_left, expires_at=expires_at),
-                reply_markup=payment_keyboard(pay_button_text="Renew membership"),
+                reply_markup=payment_keyboard(pay_button_text="💳 Продовжити підписку"),
                 context={
                     "event": "subscription_renewal_reminder",
                     "days_left": days_left,
@@ -164,7 +188,14 @@ async def enforce_expired_removal(
         if tg_user_id is None:
             continue
         uid = int(tg_user_id)
-        if _is_admin_user(config, uid):
+        if await _is_admin_user(config, repo, uid):
+            continue
+        if await has_payment_exemption(
+            bot=bot,
+            config=config,
+            tg_user_id=uid,
+            repo=repo,
+        ):
             continue
 
         try:
@@ -177,6 +208,17 @@ async def enforce_expired_removal(
                 chat_id=membership_chat_id,
                 user_id=uid,
                 only_if_banned=True,
+            )
+            await notify_user(
+                bot=bot,
+                user_id=uid,
+                text=_build_expired_removed_text(user.get("subscription_expires_at")),
+                reply_markup=payment_keyboard(pay_button_text="💳 Продовжити підписку"),
+                context={
+                    "event": "expired_membership_removed",
+                    "tg_user_id": uid,
+                    "chat_id": int(membership_chat_id),
+                },
             )
             removed_count += 1
         except TelegramBadRequest as exc:

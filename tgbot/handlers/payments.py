@@ -10,6 +10,7 @@ from tgbot.config import Config
 from tgbot.db.repo import PostgresRepo
 from tgbot.filters.admin import AdminFilter
 from tgbot.keyboards.membership import group_access_keyboard, payment_keyboard
+from tgbot.services.membership_access import has_payment_exemption, is_user_blocked
 from tgbot.services.menu_state import (
     MENU_STATE_ACTION,
     clear_tracked_keyboard,
@@ -229,7 +230,7 @@ async def admin_test_pay_link(
 
     arg_application_id = parse_int_argument(message)
     if arg_application_id == -1:
-        await message.answer("Використання: /pay [application_id_number]", parse_mode=None)
+        await message.answer("Використання: /pay [номер_заявки]", parse_mode=None)
         return
 
     if arg_application_id is None:
@@ -246,7 +247,7 @@ async def admin_test_pay_link(
                 applicant_name=message.from_user.full_name,
                 status="APPROVED_AWAITING_PAYMENT",
             )
-            status_hint = f"{application.get('status', '-')} (created test application)"
+            status_hint = f"{application.get('status', '-')} (створено тестову заявку)"
         else:
             status_hint = str(application.get("status") or "-")
         target_application_id = int(application["id"])
@@ -261,10 +262,10 @@ async def admin_test_pay_link(
         if not is_admin_test_payment_safe(application):
             await message.answer(
                 (
-                    "⚠️ /pay is blocked for this application status.\n"
-                    "Allowed statuses: APPROVED_AWAITING_PAYMENT, UNLINKED_APPLICATION_APPROVED, "
+                    "⚠️ /pay недоступна для цього статусу заявки.\n"
+                    "Дозволені статуси: APPROVED_AWAITING_PAYMENT, UNLINKED_APPLICATION_APPROVED, "
                     "PAID_AWAITING_JOIN, ACTIVE_MEMBER.\n"
-                    "Use /pay without application_id to create a safe test application."
+                    "Надішліть /pay без номера, щоб створити безпечну тестову заявку."
                 ),
                 parse_mode=None,
             )
@@ -321,6 +322,37 @@ async def start_membership_payment(
         )
         await remove_callback_keyboard(query)
         return
+    panel_data = await repo.get_user_panel_data(tg_user_id=query.from_user.id)
+    if is_user_blocked(panel_data):
+        await send_tracked_action_message_from_query(
+            query,
+            text="⛔️ Доступ до бота обмежено адміністратором.",
+        )
+        await remove_callback_keyboard(query)
+        return
+
+    is_payment_exempt = await has_payment_exemption(
+        bot=query.bot,
+        config=config,
+        tg_user_id=query.from_user.id,
+        repo=repo,
+    )
+    status = str(application.get("status") or "")
+    if is_payment_exempt and status in {
+        "APPROVED_AWAITING_PAYMENT",
+        "PAID_AWAITING_JOIN",
+        "ACTIVE_MEMBER",
+    }:
+        await send_tracked_action_message_from_query(
+            query,
+            text=(
+                "✅ Для учасників групи голосування оплата не потрібна.\n"
+                "Натисніть кнопку нижче, щоб отримати доступ до групи."
+            ),
+            reply_markup=group_access_keyboard(),
+        )
+        await remove_callback_keyboard(query)
+        return
 
     if not is_application_payment_eligible(application):
         await send_tracked_action_message_from_query(
@@ -367,6 +399,14 @@ async def check_membership_payment_status(
         await send_tracked_action_message_from_query(
             query,
             text="⚠️ Заявку не знайдено. Зверніться до адміністратора.",
+        )
+        await remove_callback_keyboard(query)
+        return
+    panel_data = await repo.get_user_panel_data(tg_user_id=query.from_user.id)
+    if is_user_blocked(panel_data):
+        await send_tracked_action_message_from_query(
+            query,
+            text="⛔️ Доступ до бота обмежено адміністратором.",
         )
         await remove_callback_keyboard(query)
         return

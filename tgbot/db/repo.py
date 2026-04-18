@@ -327,6 +327,679 @@ class PostgresRepo:
         finally:
             await self._release_conn(acquired, conn)
 
+    async def set_user_subscription_until(
+        self,
+        *,
+        tg_user_id: int,
+        subscription_expires_at: datetime,
+        full_name: str | None = None,
+        username: str | None = None,
+        language_code: str | None = None,
+        conn: Connection | None = None,
+    ) -> dict[str, Any]:
+        # Upsert user and set ACTIVE subscription until provided timestamp.
+        acquired = await self._acquire_conn(conn)
+        try:
+            expires_at = subscription_expires_at
+            if expires_at.tzinfo is None:
+                expires_at = expires_at.replace(tzinfo=timezone.utc)
+            else:
+                expires_at = expires_at.astimezone(timezone.utc)
+            normalized_name = self._clean_string(full_name) or f"User {int(tg_user_id)}"
+            normalized_username = self._clean_string(username)
+            normalized_language_code = self._clean_string(language_code)
+            row = await acquired.fetchrow(
+                """
+                INSERT INTO users (
+                    tg_user_id,
+                    username,
+                    full_name,
+                    language_code,
+                    is_active,
+                    member_since,
+                    subscription_expires_at,
+                    subscription_status
+                )
+                VALUES ($1, $2, $3, $4, TRUE, NOW(), $5, 'ACTIVE')
+                ON CONFLICT (tg_user_id) DO UPDATE
+                SET
+                    username = COALESCE(EXCLUDED.username, users.username),
+                    full_name = COALESCE(EXCLUDED.full_name, users.full_name),
+                    language_code = COALESCE(EXCLUDED.language_code, users.language_code),
+                    is_active = TRUE,
+                    member_since = COALESCE(users.member_since, NOW()),
+                    subscription_expires_at = $5,
+                    subscription_status = 'ACTIVE',
+                    updated_at = NOW()
+                RETURNING *;
+                """,
+                int(tg_user_id),
+                normalized_username,
+                normalized_name,
+                normalized_language_code,
+                expires_at,
+            )
+            return _record_to_dict(row) or {}
+        finally:
+            await self._release_conn(acquired, conn)
+
+    async def is_bot_admin(
+        self,
+        tg_user_id: int,
+        conn: Connection | None = None,
+    ) -> bool:
+        # Check runtime admin flag from voting_members (fallback to users legacy flag).
+        acquired = await self._acquire_conn(conn)
+        try:
+            value = await acquired.fetchval(
+                """
+                SELECT
+                    COALESCE(
+                        (SELECT vm.is_bot_admin FROM voting_members vm WHERE vm.tg_user_id = $1),
+                        FALSE
+                    )
+                    OR
+                    COALESCE(
+                        (SELECT u.is_bot_admin FROM users u WHERE u.tg_user_id = $1),
+                        FALSE
+                    );
+                """,
+                int(tg_user_id),
+            )
+            return bool(value)
+        finally:
+            await self._release_conn(acquired, conn)
+
+    async def list_bot_admin_ids(
+        self,
+        conn: Connection | None = None,
+    ) -> list[int]:
+        # Return all DB-stored admin user ids (voting_members + legacy users flag).
+        acquired = await self._acquire_conn(conn)
+        try:
+            rows = await acquired.fetch(
+                """
+                SELECT DISTINCT tg_user_id
+                FROM (
+                    SELECT vm.tg_user_id
+                    FROM voting_members vm
+                    WHERE vm.is_bot_admin = TRUE
+                    UNION
+                    SELECT u.tg_user_id
+                    FROM users u
+                    WHERE COALESCE(u.is_bot_admin, FALSE) = TRUE
+                ) t
+                ORDER BY tg_user_id;
+                """
+            )
+            return [int(row["tg_user_id"]) for row in rows]
+        finally:
+            await self._release_conn(acquired, conn)
+
+    async def list_broadcast_user_ids(
+        self,
+        *,
+        include_inactive: bool = False,
+        conn: Connection | None = None,
+    ) -> list[int]:
+        # Return unique Telegram user ids for admin broadcast.
+        acquired = await self._acquire_conn(conn)
+        try:
+            rows = await acquired.fetch(
+                """
+                SELECT u.tg_user_id
+                FROM users u
+                WHERE u.tg_user_id IS NOT NULL
+                  AND ($1::bool OR u.is_active = TRUE)
+                ORDER BY u.tg_user_id ASC;
+                """,
+                bool(include_inactive),
+            )
+            return [int(row["tg_user_id"]) for row in rows]
+        finally:
+            await self._release_conn(acquired, conn)
+
+    async def grant_bot_admin(
+        self,
+        *,
+        tg_user_id: int,
+        full_name: str | None = None,
+        username: str | None = None,
+        language_code: str | None = None,
+        conn: Connection | None = None,
+    ) -> dict[str, Any]:
+        # Upsert user and grant bot-admin in voting_members.
+        acquired = await self._acquire_conn(conn)
+        try:
+            normalized_full_name = self._clean_string(full_name) or f"User {int(tg_user_id)}"
+            normalized_username = self._clean_string(username)
+            normalized_language_code = self._clean_string(language_code)
+            user_row = await acquired.fetchrow(
+                """
+                INSERT INTO users (
+                    tg_user_id,
+                    username,
+                    full_name,
+                    language_code,
+                    is_active,
+                    is_bot_admin
+                )
+                VALUES ($1, $2, $3, $4, TRUE, TRUE)
+                ON CONFLICT (tg_user_id) DO UPDATE
+                SET
+                    username = COALESCE(EXCLUDED.username, users.username),
+                    full_name = COALESCE(EXCLUDED.full_name, users.full_name),
+                    language_code = COALESCE(EXCLUDED.language_code, users.language_code),
+                    is_active = TRUE,
+                    is_bot_admin = TRUE,
+                    updated_at = NOW()
+                RETURNING *;
+                """,
+                int(tg_user_id),
+                normalized_username,
+                normalized_full_name,
+                normalized_language_code,
+            )
+            await acquired.execute(
+                """
+                INSERT INTO voting_members (
+                    tg_user_id,
+                    username,
+                    full_name,
+                    language_code,
+                    is_bot_admin,
+                    member_status,
+                    first_seen_at,
+                    last_seen_at,
+                    last_verified_at
+                )
+                VALUES ($1, $2, $3, $4, TRUE, 'ACTIVE', NOW(), NOW(), NOW())
+                ON CONFLICT (tg_user_id) DO UPDATE
+                SET
+                    username = COALESCE(EXCLUDED.username, voting_members.username),
+                    full_name = COALESCE(EXCLUDED.full_name, voting_members.full_name),
+                    language_code = COALESCE(EXCLUDED.language_code, voting_members.language_code),
+                    is_bot_admin = TRUE,
+                    member_status = 'ACTIVE',
+                    last_seen_at = NOW(),
+                    last_verified_at = NOW(),
+                    updated_at = NOW();
+                """,
+                int(tg_user_id),
+                normalized_username,
+                normalized_full_name,
+                normalized_language_code,
+            )
+            return _record_to_dict(user_row) or {}
+        finally:
+            await self._release_conn(acquired, conn)
+
+    async def get_voting_member(
+        self,
+        tg_user_id: int,
+        conn: Connection | None = None,
+    ) -> dict[str, Any] | None:
+        # Return voting-member row by Telegram user id.
+        acquired = await self._acquire_conn(conn)
+        try:
+            row = await acquired.fetchrow(
+                """
+                SELECT *
+                FROM voting_members
+                WHERE tg_user_id = $1;
+                """,
+                int(tg_user_id),
+            )
+            return _record_to_dict(row)
+        finally:
+            await self._release_conn(acquired, conn)
+
+    async def list_known_tg_user_ids_for_voting_sync(
+        self,
+        *,
+        limit: int = 5000,
+        conn: Connection | None = None,
+    ) -> list[int]:
+        # Return deduplicated Telegram user ids from voting-related sources.
+        acquired = await self._acquire_conn(conn)
+        try:
+            rows = await acquired.fetch(
+                """
+                SELECT tg_user_id
+                FROM (
+                    SELECT vm.tg_user_id
+                    FROM voting_members vm
+                    UNION
+                    SELECT av.tg_user_id
+                    FROM application_votes av
+                ) ids
+                WHERE tg_user_id IS NOT NULL
+                ORDER BY tg_user_id ASC
+                LIMIT $1;
+                """,
+                max(int(limit), 1),
+            )
+            return [int(row["tg_user_id"]) for row in rows]
+        finally:
+            await self._release_conn(acquired, conn)
+
+    async def is_active_voting_member(
+        self,
+        tg_user_id: int,
+        conn: Connection | None = None,
+    ) -> bool:
+        # Check ACTIVE membership flag in voting_members table.
+        acquired = await self._acquire_conn(conn)
+        try:
+            value = await acquired.fetchval(
+                """
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM voting_members
+                    WHERE tg_user_id = $1
+                      AND member_status = 'ACTIVE'
+                );
+                """,
+                int(tg_user_id),
+            )
+            return bool(value)
+        finally:
+            await self._release_conn(acquired, conn)
+
+    async def upsert_voting_member(
+        self,
+        *,
+        tg_user_id: int,
+        username: str | None = None,
+        full_name: str | None = None,
+        language_code: str | None = None,
+        member_status: str = "ACTIVE",
+        is_bot_admin: bool | None = None,
+        verified_at: datetime | None = None,
+        conn: Connection | None = None,
+    ) -> dict[str, Any]:
+        # Upsert voting-member profile/status with optional admin flag.
+        acquired = await self._acquire_conn(conn)
+        try:
+            normalized_status = str(member_status or "ACTIVE").strip().upper()
+            if normalized_status not in {"ACTIVE", "LEFT"}:
+                normalized_status = "ACTIVE"
+            normalized_username = self._clean_string(username)
+            normalized_full_name = self._clean_string(full_name) or f"User {int(tg_user_id)}"
+            normalized_language_code = self._clean_string(language_code)
+            row = await acquired.fetchrow(
+                """
+                INSERT INTO voting_members (
+                    tg_user_id,
+                    username,
+                    full_name,
+                    language_code,
+                    is_bot_admin,
+                    member_status,
+                    first_seen_at,
+                    last_seen_at,
+                    last_verified_at
+                )
+                VALUES (
+                    $1,
+                    $2,
+                    $3,
+                    $4,
+                    COALESCE($5, FALSE),
+                    $6,
+                    NOW(),
+                    NOW(),
+                    $7
+                )
+                ON CONFLICT (tg_user_id) DO UPDATE
+                SET
+                    username = COALESCE(EXCLUDED.username, voting_members.username),
+                    full_name = COALESCE(EXCLUDED.full_name, voting_members.full_name),
+                    language_code = COALESCE(EXCLUDED.language_code, voting_members.language_code),
+                    is_bot_admin = COALESCE($5, voting_members.is_bot_admin),
+                    member_status = $6,
+                    last_seen_at = NOW(),
+                    last_verified_at = COALESCE($7, voting_members.last_verified_at),
+                    updated_at = NOW()
+                RETURNING *;
+                """,
+                int(tg_user_id),
+                normalized_username,
+                normalized_full_name,
+                normalized_language_code,
+                is_bot_admin,
+                normalized_status,
+                verified_at,
+            )
+            return _record_to_dict(row) or {}
+        finally:
+            await self._release_conn(acquired, conn)
+
+    async def set_voting_member_status(
+        self,
+        *,
+        tg_user_id: int,
+        member_status: str,
+        clear_admin: bool = False,
+        conn: Connection | None = None,
+    ) -> dict[str, Any] | None:
+        # Update voting member status; optionally revoke admin flag on leave.
+        acquired = await self._acquire_conn(conn)
+        try:
+            normalized_status = str(member_status or "LEFT").strip().upper()
+            if normalized_status not in {"ACTIVE", "LEFT"}:
+                normalized_status = "LEFT"
+            row = await acquired.fetchrow(
+                """
+                UPDATE voting_members
+                SET
+                    member_status = $2,
+                    is_bot_admin = CASE WHEN $3 THEN FALSE ELSE is_bot_admin END,
+                    last_seen_at = NOW(),
+                    last_verified_at = NOW(),
+                    updated_at = NOW()
+                WHERE tg_user_id = $1
+                RETURNING *;
+                """,
+                int(tg_user_id),
+                normalized_status,
+                bool(clear_admin),
+            )
+            return _record_to_dict(row)
+        finally:
+            await self._release_conn(acquired, conn)
+
+    async def get_user_membership_invite(
+        self,
+        tg_user_id: int,
+        conn: Connection | None = None,
+    ) -> dict[str, Any] | None:
+        # Return last stored membership invite link metadata for user.
+        acquired = await self._acquire_conn(conn)
+        try:
+            row = await acquired.fetchrow(
+                """
+                SELECT
+                    last_membership_invite_link,
+                    last_membership_invite_expires_at
+                FROM users
+                WHERE tg_user_id = $1;
+                """,
+                int(tg_user_id),
+            )
+            return _record_to_dict(row)
+        finally:
+            await self._release_conn(acquired, conn)
+
+    async def set_user_membership_invite(
+        self,
+        *,
+        tg_user_id: int,
+        invite_link: str,
+        invite_expires_at: datetime | None,
+        conn: Connection | None = None,
+    ) -> dict[str, Any] | None:
+        # Persist latest generated invite link for dedupe/revoke logic.
+        acquired = await self._acquire_conn(conn)
+        try:
+            row = await acquired.fetchrow(
+                """
+                UPDATE users
+                SET
+                    last_membership_invite_link = $2,
+                    last_membership_invite_expires_at = $3,
+                    updated_at = NOW()
+                WHERE tg_user_id = $1
+                RETURNING *;
+                """,
+                int(tg_user_id),
+                self._clean_string(invite_link),
+                invite_expires_at,
+            )
+            return _record_to_dict(row)
+        finally:
+            await self._release_conn(acquired, conn)
+
+    async def clear_user_membership_invite(
+        self,
+        tg_user_id: int,
+        conn: Connection | None = None,
+    ) -> dict[str, Any] | None:
+        # Drop cached invite link metadata after successful join/sync.
+        acquired = await self._acquire_conn(conn)
+        try:
+            row = await acquired.fetchrow(
+                """
+                UPDATE users
+                SET
+                    last_membership_invite_link = NULL,
+                    last_membership_invite_expires_at = NULL,
+                    updated_at = NOW()
+                WHERE tg_user_id = $1
+                RETURNING *;
+                """,
+                int(tg_user_id),
+            )
+            return _record_to_dict(row)
+        finally:
+            await self._release_conn(acquired, conn)
+
+    async def activate_membership_from_group_entry(
+        self,
+        *,
+        tg_user_id: int,
+        full_name: str | None = None,
+        username: str | None = None,
+        language_code: str | None = None,
+    ) -> dict[str, Any]:
+        # Sync DB state after manual/approved membership-group entry.
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                name_value = self._clean_string(full_name) or f"User {int(tg_user_id)}"
+                username_value = self._clean_string(username)
+                language_value = self._clean_string(language_code)
+
+                user_before = await conn.fetchrow(
+                    """
+                    SELECT *
+                    FROM users
+                    WHERE tg_user_id = $1
+                    FOR UPDATE;
+                    """,
+                    int(tg_user_id),
+                )
+                if user_before is None:
+                    user_before = await conn.fetchrow(
+                        """
+                        INSERT INTO users (tg_user_id, username, full_name, language_code, is_active)
+                        VALUES ($1, $2, $3, $4, TRUE)
+                        RETURNING *;
+                        """,
+                        int(tg_user_id),
+                        username_value,
+                        name_value,
+                        language_value,
+                    )
+                else:
+                    user_before = await conn.fetchrow(
+                        """
+                        UPDATE users
+                        SET
+                            username = COALESCE($2, username),
+                            full_name = COALESCE($3, full_name),
+                            language_code = COALESCE($4, language_code),
+                            is_active = TRUE,
+                            updated_at = NOW()
+                        WHERE tg_user_id = $1
+                        RETURNING *;
+                        """,
+                        int(tg_user_id),
+                        username_value,
+                        name_value,
+                        language_value,
+                    )
+
+                if user_before is None:
+                    raise ValueError("failed to create/update user for membership sync")
+
+                now_utc = _utcnow()
+                current_expires_at = user_before["subscription_expires_at"]
+                if (
+                    isinstance(current_expires_at, datetime)
+                    and current_expires_at > now_utc
+                ):
+                    next_expires_at = current_expires_at
+                    started_from_group_entry = False
+                else:
+                    next_expires_at = now_utc + timedelta(days=365)
+                    started_from_group_entry = True
+
+                user_after = await conn.fetchrow(
+                    """
+                    UPDATE users
+                    SET
+                        member_since = COALESCE(member_since, NOW()),
+                        subscription_expires_at = $2,
+                        subscription_status = 'ACTIVE',
+                        last_membership_invite_link = NULL,
+                        last_membership_invite_expires_at = NULL,
+                        updated_at = NOW()
+                    WHERE tg_user_id = $1
+                    RETURNING *;
+                    """,
+                    int(tg_user_id),
+                    next_expires_at,
+                )
+                if user_after is None:
+                    raise ValueError("failed to update user subscription during membership sync")
+
+                latest_app = await conn.fetchrow(
+                    """
+                    SELECT *
+                    FROM applications
+                    WHERE tg_user_id = $1
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                    FOR UPDATE;
+                    """,
+                    int(tg_user_id),
+                )
+
+                created_application = False
+                if latest_app is None:
+                    latest_app = await conn.fetchrow(
+                        """
+                        INSERT INTO applications (
+                            source,
+                            status,
+                            tg_user_id,
+                            applicant_name,
+                            approved_at
+                        )
+                        VALUES (
+                            'manual',
+                            'ACTIVE_MEMBER',
+                            $1,
+                            $2,
+                            NOW()
+                        )
+                        RETURNING *;
+                        """,
+                        int(tg_user_id),
+                        name_value,
+                    )
+                    created_application = True
+                else:
+                    latest_app = await conn.fetchrow(
+                        """
+                        UPDATE applications
+                        SET
+                            status = 'ACTIVE_MEMBER',
+                            vote_status = CASE
+                                WHEN status IN ('APPLICATION_PENDING', 'UNLINKED_APPLICATION_PENDING')
+                                    THEN 'PROCESSED'
+                                ELSE vote_status
+                            END,
+                            approved_at = COALESCE(approved_at, NOW()),
+                            rejected_at = NULL,
+                            updated_at = NOW()
+                        WHERE id = $1
+                        RETURNING *;
+                        """,
+                        int(latest_app["id"]),
+                    )
+
+                if latest_app is None:
+                    raise ValueError("failed to sync application status during membership sync")
+
+                return {
+                    "user": _record_to_dict(user_after),
+                    "application": _record_to_dict(latest_app),
+                    "created_application": created_application,
+                    "started_from_group_entry": started_from_group_entry,
+                }
+
+    async def block_user_access_from_membership_removal(
+        self,
+        *,
+        tg_user_id: int,
+        full_name: str | None = None,
+        username: str | None = None,
+        language_code: str | None = None,
+    ) -> dict[str, Any]:
+        # Restrict bot access when user is removed from membership group.
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                name_value = self._clean_string(full_name) or f"User {int(tg_user_id)}"
+                username_value = self._clean_string(username)
+                language_value = self._clean_string(language_code)
+
+                user_before = await conn.fetchrow(
+                    """
+                    SELECT *
+                    FROM users
+                    WHERE tg_user_id = $1
+                    FOR UPDATE;
+                    """,
+                    int(tg_user_id),
+                )
+                if user_before is None:
+                    user_before = await conn.fetchrow(
+                        """
+                        INSERT INTO users (tg_user_id, username, full_name, language_code, is_active)
+                        VALUES ($1, $2, $3, $4, TRUE)
+                        RETURNING *;
+                        """,
+                        int(tg_user_id),
+                        username_value,
+                        name_value,
+                        language_value,
+                    )
+
+                user_after = await conn.fetchrow(
+                    """
+                    UPDATE users
+                    SET
+                        username = COALESCE($2, username),
+                        full_name = COALESCE($3, full_name),
+                        language_code = COALESCE($4, language_code),
+                        subscription_status = 'BLOCKED',
+                        last_membership_invite_link = NULL,
+                        last_membership_invite_expires_at = NULL,
+                        updated_at = NOW()
+                    WHERE tg_user_id = $1
+                    RETURNING *;
+                    """,
+                    int(tg_user_id),
+                    username_value,
+                    name_value,
+                    language_value,
+                )
+                if user_after is None:
+                    raise ValueError("failed to block user access after membership removal")
+
+                return {"user": _record_to_dict(user_after)}
+
     async def get_user_by_tg_user_id(
         self, tg_user_id: int, conn: Connection | None = None
     ) -> dict[str, Any] | None:
@@ -568,6 +1241,361 @@ class PostgresRepo:
         finally:
             await self._release_conn(acquired, conn)
 
+    async def count_library_topics(
+        self,
+        *,
+        include_inactive: bool = False,
+        conn: Connection | None = None,
+    ) -> int:
+        # Count library topics for pagination.
+        acquired = await self._acquire_conn(conn)
+        try:
+            value = await acquired.fetchval(
+                """
+                SELECT COUNT(*)
+                FROM library_topics
+                WHERE ($1::bool OR is_active = TRUE);
+                """,
+                bool(include_inactive),
+            )
+            return int(value or 0)
+        finally:
+            await self._release_conn(acquired, conn)
+
+    async def list_library_topics(
+        self,
+        *,
+        limit: int,
+        offset: int,
+        include_inactive: bool = False,
+        conn: Connection | None = None,
+    ) -> list[dict[str, Any]]:
+        # Paginated library topics ordered by sort_order.
+        acquired = await self._acquire_conn(conn)
+        try:
+            rows = await acquired.fetch(
+                """
+                SELECT id, title, sort_order, is_active, created_at, updated_at
+                FROM library_topics
+                WHERE ($1::bool OR is_active = TRUE)
+                ORDER BY sort_order ASC, id ASC
+                LIMIT $2 OFFSET $3;
+                """,
+                bool(include_inactive),
+                int(limit),
+                int(offset),
+            )
+            return [dict(row) for row in rows]
+        finally:
+            await self._release_conn(acquired, conn)
+
+    async def get_library_topic(
+        self,
+        *,
+        topic_id: int,
+        include_inactive: bool = False,
+        conn: Connection | None = None,
+    ) -> dict[str, Any] | None:
+        # Get single topic by id.
+        acquired = await self._acquire_conn(conn)
+        try:
+            row = await acquired.fetchrow(
+                """
+                SELECT id, title, sort_order, is_active, created_at, updated_at
+                FROM library_topics
+                WHERE id = $1
+                  AND ($2::bool OR is_active = TRUE)
+                LIMIT 1;
+                """,
+                int(topic_id),
+                bool(include_inactive),
+            )
+            return _record_to_dict(row)
+        finally:
+            await self._release_conn(acquired, conn)
+
+    async def create_library_topic(
+        self,
+        *,
+        title: str,
+        sort_order: int | None = None,
+        conn: Connection | None = None,
+    ) -> dict[str, Any]:
+        # Create active library topic.
+        normalized_title = self._clean_string(title)
+        if not normalized_title:
+            raise ValueError("topic title is required")
+
+        acquired = await self._acquire_conn(conn)
+        try:
+            next_sort_order = sort_order
+            if next_sort_order is None:
+                value = await acquired.fetchval(
+                    "SELECT COALESCE(MAX(sort_order), 0) + 10 FROM library_topics;"
+                )
+                next_sort_order = int(value or 10)
+
+            row = await acquired.fetchrow(
+                """
+                INSERT INTO library_topics (title, sort_order, is_active, updated_at)
+                VALUES ($1, $2, TRUE, NOW())
+                ON CONFLICT (title) DO UPDATE
+                SET
+                    is_active = TRUE,
+                    updated_at = NOW()
+                RETURNING id, title, sort_order, is_active, created_at, updated_at;
+                """,
+                normalized_title,
+                int(next_sort_order),
+            )
+            return _record_to_dict(row) or {}
+        finally:
+            await self._release_conn(acquired, conn)
+
+    async def update_library_topic(
+        self,
+        *,
+        topic_id: int,
+        title: str,
+        conn: Connection | None = None,
+    ) -> dict[str, Any] | None:
+        # Rename topic.
+        normalized_title = self._clean_string(title)
+        if not normalized_title:
+            raise ValueError("topic title is required")
+        acquired = await self._acquire_conn(conn)
+        try:
+            row = await acquired.fetchrow(
+                """
+                UPDATE library_topics
+                SET
+                    title = $2,
+                    updated_at = NOW()
+                WHERE id = $1
+                RETURNING id, title, sort_order, is_active, created_at, updated_at;
+                """,
+                int(topic_id),
+                normalized_title,
+            )
+            return _record_to_dict(row)
+        finally:
+            await self._release_conn(acquired, conn)
+
+    async def delete_library_topic(
+        self,
+        *,
+        topic_id: int,
+        conn: Connection | None = None,
+    ) -> bool:
+        # Delete topic with all related articles.
+        acquired = await self._acquire_conn(conn)
+        try:
+            row = await acquired.fetchrow(
+                "DELETE FROM library_topics WHERE id = $1 RETURNING id;",
+                int(topic_id),
+            )
+            return row is not None
+        finally:
+            await self._release_conn(acquired, conn)
+
+    async def count_library_articles(
+        self,
+        *,
+        topic_id: int,
+        include_inactive: bool = False,
+        conn: Connection | None = None,
+    ) -> int:
+        # Count articles in topic for pagination.
+        acquired = await self._acquire_conn(conn)
+        try:
+            value = await acquired.fetchval(
+                """
+                SELECT COUNT(*)
+                FROM library_articles
+                WHERE topic_id = $1
+                  AND ($2::bool OR is_active = TRUE);
+                """,
+                int(topic_id),
+                bool(include_inactive),
+            )
+            return int(value or 0)
+        finally:
+            await self._release_conn(acquired, conn)
+
+    async def list_library_articles(
+        self,
+        *,
+        topic_id: int,
+        limit: int,
+        offset: int,
+        include_inactive: bool = False,
+        conn: Connection | None = None,
+    ) -> list[dict[str, Any]]:
+        # Paginated articles for selected topic.
+        acquired = await self._acquire_conn(conn)
+        try:
+            rows = await acquired.fetch(
+                """
+                SELECT
+                    a.id,
+                    a.topic_id,
+                    a.title,
+                    a.content,
+                    a.sort_order,
+                    a.is_active,
+                    a.created_at,
+                    a.updated_at
+                FROM library_articles a
+                WHERE a.topic_id = $1
+                  AND ($2::bool OR a.is_active = TRUE)
+                ORDER BY a.sort_order ASC, a.id ASC
+                LIMIT $3 OFFSET $4;
+                """,
+                int(topic_id),
+                bool(include_inactive),
+                int(limit),
+                int(offset),
+            )
+            return [dict(row) for row in rows]
+        finally:
+            await self._release_conn(acquired, conn)
+
+    async def get_library_article(
+        self,
+        *,
+        article_id: int,
+        include_inactive: bool = False,
+        conn: Connection | None = None,
+    ) -> dict[str, Any] | None:
+        # Get single article with topic title.
+        acquired = await self._acquire_conn(conn)
+        try:
+            row = await acquired.fetchrow(
+                """
+                SELECT
+                    a.id,
+                    a.topic_id,
+                    a.title,
+                    a.content,
+                    a.sort_order,
+                    a.is_active,
+                    a.created_at,
+                    a.updated_at,
+                    t.title AS topic_title
+                FROM library_articles a
+                JOIN library_topics t ON t.id = a.topic_id
+                WHERE a.id = $1
+                  AND ($2::bool OR a.is_active = TRUE)
+                LIMIT 1;
+                """,
+                int(article_id),
+                bool(include_inactive),
+            )
+            return _record_to_dict(row)
+        finally:
+            await self._release_conn(acquired, conn)
+
+    async def create_library_article(
+        self,
+        *,
+        topic_id: int,
+        title: str,
+        content: str,
+        sort_order: int | None = None,
+        conn: Connection | None = None,
+    ) -> dict[str, Any]:
+        # Create article in topic.
+        normalized_title = self._clean_string(title)
+        normalized_content = self._clean_string(content)
+        if not normalized_title:
+            raise ValueError("article title is required")
+        if not normalized_content:
+            raise ValueError("article content is required")
+
+        acquired = await self._acquire_conn(conn)
+        try:
+            next_sort_order = sort_order
+            if next_sort_order is None:
+                value = await acquired.fetchval(
+                    """
+                    SELECT COALESCE(MAX(sort_order), 0) + 10
+                    FROM library_articles
+                    WHERE topic_id = $1;
+                    """,
+                    int(topic_id),
+                )
+                next_sort_order = int(value or 10)
+
+            row = await acquired.fetchrow(
+                """
+                INSERT INTO library_articles (
+                    topic_id, title, content, sort_order, is_active, updated_at
+                )
+                VALUES ($1, $2, $3, $4, TRUE, NOW())
+                RETURNING id, topic_id, title, content, sort_order, is_active, created_at, updated_at;
+                """,
+                int(topic_id),
+                normalized_title,
+                normalized_content,
+                int(next_sort_order),
+            )
+            return _record_to_dict(row) or {}
+        finally:
+            await self._release_conn(acquired, conn)
+
+    async def update_library_article(
+        self,
+        *,
+        article_id: int,
+        title: str,
+        content: str,
+        conn: Connection | None = None,
+    ) -> dict[str, Any] | None:
+        # Update article title/content.
+        normalized_title = self._clean_string(title)
+        normalized_content = self._clean_string(content)
+        if not normalized_title:
+            raise ValueError("article title is required")
+        if not normalized_content:
+            raise ValueError("article content is required")
+
+        acquired = await self._acquire_conn(conn)
+        try:
+            row = await acquired.fetchrow(
+                """
+                UPDATE library_articles
+                SET
+                    title = $2,
+                    content = $3,
+                    updated_at = NOW()
+                WHERE id = $1
+                RETURNING id, topic_id, title, content, sort_order, is_active, created_at, updated_at;
+                """,
+                int(article_id),
+                normalized_title,
+                normalized_content,
+            )
+            return _record_to_dict(row)
+        finally:
+            await self._release_conn(acquired, conn)
+
+    async def delete_library_article(
+        self,
+        *,
+        article_id: int,
+        conn: Connection | None = None,
+    ) -> bool:
+        # Delete article by id.
+        acquired = await self._acquire_conn(conn)
+        try:
+            row = await acquired.fetchrow(
+                "DELETE FROM library_articles WHERE id = $1 RETURNING id;",
+                int(article_id),
+            )
+            return row is not None
+        finally:
+            await self._release_conn(acquired, conn)
+
     async def get_users_with_subscription_expiring(
         self,
         days_left: int,
@@ -705,7 +1733,9 @@ class PostgresRepo:
         # Find latest Telegram-linked user by matching phone/email in applications.
         phone = self._clean_string(contact_phone)
         email = self._clean_string(contact_email)
-        if phone is None and email is None:
+        phone_digits = "".join(ch for ch in phone if ch.isdigit()) if phone else ""
+        phone_tail10 = phone_digits[-10:] if len(phone_digits) >= 10 else None
+        if phone_tail10 is None and email is None:
             return None
 
         acquired = await self._acquire_conn(conn)
@@ -716,7 +1746,10 @@ class PostgresRepo:
                 FROM applications a
                 WHERE a.tg_user_id IS NOT NULL
                   AND (
-                    ($1::text IS NOT NULL AND a.contact_phone = $1)
+                    (
+                        $1::text IS NOT NULL
+                        AND right(regexp_replace(COALESCE(a.contact_phone, ''), '\\D', '', 'g'), 10) = $1
+                    )
                     OR (
                         $2::text IS NOT NULL
                         AND a.contact_email IS NOT NULL
@@ -726,7 +1759,7 @@ class PostgresRepo:
                 ORDER BY a.created_at DESC
                 LIMIT 1;
                 """,
-                phone,
+                phone_tail10,
                 email,
             )
             if tg_user_id is None:

@@ -6,12 +6,14 @@ from html import escape as html_escape
 from typing import Any
 
 from aiogram import Bot
-from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
+from aiogram.exceptions import TelegramAPIError, TelegramBadRequest, TelegramMigrateToChat
 
 from tgbot.config import Config
 from tgbot.db.repo import PostgresRepo
 from tgbot.keyboards.membership import payment_keyboard
 from tgbot.keyboards.voting import application_vote_keyboard
+from tgbot.services.chat_config_sync import RUNTIME_VOTING_CHAT_ID_KEY
+from tgbot.services.chat_config_sync import resolve_voting_chat_id
 from tgbot.services.notify import notify_user
 
 """
@@ -146,7 +148,12 @@ async def start_vote(
     repo: PostgresRepo,
 ) -> dict[str, Any]:
     # Create one-message inline vote and persist vote metadata.
-    if not config.voting.chat_id:
+    voting_chat_id = await resolve_voting_chat_id(
+        bot=bot,
+        config=config,
+        repo=repo,
+    )
+    if not voting_chat_id:
         raise RuntimeError("VOTING_CHAT_ID is not configured.")
 
     app = await repo.get_application_by_id(application_id)
@@ -166,22 +173,38 @@ async def start_vote(
     if config.voting.thread_id is not None:
         send_kwargs["message_thread_id"] = config.voting.thread_id
 
-    contact_url = await _resolve_manual_contact_url(
-        repo=repo,
-        application_row=app,
-    )
-    vote_message = await bot.send_message(
-        chat_id=config.voting.chat_id,
-        text=application_text,
-        reply_markup=application_vote_keyboard(
-            application_id=application_id,
-            yes_count=0,
-            no_count=0,
-            contact_url=contact_url,
-        ),
-        parse_mode="HTML",
-        **send_kwargs,
-    )
+    try:
+        vote_message = await bot.send_message(
+            chat_id=voting_chat_id,
+            text=application_text,
+            reply_markup=application_vote_keyboard(
+                application_id=application_id,
+                yes_count=0,
+                no_count=0,
+                include_manual_contact_button=False,
+            ),
+            parse_mode="HTML",
+            **send_kwargs,
+        )
+    except TelegramMigrateToChat as exc:
+        config.voting.chat_id = int(exc.migrate_to_chat_id)
+        voting_chat_id = config.voting.chat_id
+        await repo.set_setting(
+            key=RUNTIME_VOTING_CHAT_ID_KEY,
+            value_text=str(voting_chat_id),
+        )
+        vote_message = await bot.send_message(
+            chat_id=voting_chat_id,
+            text=application_text,
+            reply_markup=application_vote_keyboard(
+                application_id=application_id,
+                yes_count=0,
+                no_count=0,
+                include_manual_contact_button=False,
+            ),
+            parse_mode="HTML",
+            **send_kwargs,
+        )
 
     async with repo.pool.acquire() as conn:
         async with conn.transaction():
@@ -298,11 +321,6 @@ async def refresh_vote_message_markup(
 
     yes_count = int(application_row.get("vote_yes_count") or 0)
     no_count = int(application_row.get("vote_no_count") or 0)
-    contact_url = await _resolve_manual_contact_url(
-        repo=repo,
-        application_row=application_row,
-    )
-
     try:
         await bot.edit_message_reply_markup(
             chat_id=int(chat_id),
@@ -311,7 +329,7 @@ async def refresh_vote_message_markup(
                 application_id=int(application_id),
                 yes_count=yes_count,
                 no_count=no_count,
-                contact_url=contact_url,
+                include_manual_contact_button=False,
             ),
         )
     except TelegramBadRequest as exc:
@@ -411,7 +429,7 @@ def _build_final_vote_line(
     no_count: int,
 ) -> str:
     # Build concise final decision line for the vote message.
-    decision = "СХВАЛЕНО" if approved else "ВІДХИЛЕНО"
+    decision = "✅ СХВАЛЕНО" if approved else "❌ ВІДХИЛЕНО"
     return f"Підсумок голосування: {decision} (За: {yes_count}, Проти: {no_count})"
 
 
@@ -493,6 +511,7 @@ async def _update_final_vote_message(
             yes_count=yes_count,
             no_count=no_count,
             include_vote_buttons=False,
+            include_manual_contact_button=True,
             contact_url=contact_url,
         )
         if approved

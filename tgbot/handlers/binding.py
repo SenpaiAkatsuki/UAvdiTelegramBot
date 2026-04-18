@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
@@ -14,6 +14,7 @@ from tgbot.db.repo import PostgresRepo
 from tgbot.keyboards.membership import (
     application_entry_keyboard,
     bind_back_keyboard,
+    group_access_keyboard,
     payment_keyboard,
 )
 from tgbot.services.menu_state import (
@@ -21,6 +22,7 @@ from tgbot.services.menu_state import (
     clear_tracked_keyboard,
     remember_tracked_message,
 )
+from tgbot.services.admin_access import get_effective_admin_ids
 from tgbot.services.notify import notify_admins
 
 """
@@ -32,6 +34,8 @@ manual admin confirmation cases, and post-bind routing to next step.
 
 binding_router = Router()
 TOKEN_TTL_HOURS = 24
+LEGACY_IMPORT_EXPIRY_PREFIX = "legacy_import_expiry="
+LEGACY_IMPORT_VOTING_MEMBER_PREFIX = "legacy_import_voting_member="
 
 
 class BindStates(StatesGroup):
@@ -82,6 +86,56 @@ async def get_or_create_active_application_token(
 def extract_phone_digits(value: str) -> str:
     # Normalize phone input to digits-only format.
     return "".join(ch for ch in value if ch.isdigit())
+
+
+def parse_legacy_import_expiry(application: dict[str, Any]) -> datetime | None:
+    # Parse legacy import expiry marker from application metadata.
+    raw_candidates = [
+        application.get("weblium_referer"),
+        application.get("specialization"),
+    ]
+    for raw in raw_candidates:
+        text = str(raw or "").strip()
+        if not text:
+            continue
+        marker_index = text.find(LEGACY_IMPORT_EXPIRY_PREFIX)
+        if marker_index < 0:
+            continue
+        date_chunk = text[marker_index + len(LEGACY_IMPORT_EXPIRY_PREFIX):].strip()
+        if not date_chunk:
+            continue
+        # Allow separators after date marker: "legacy_import_expiry=YYYY-MM-DD;..."
+        date_token = date_chunk.split(";", 1)[0].strip().split()[0].strip()
+        try:
+            parsed_date = date.fromisoformat(date_token)
+        except ValueError:
+            continue
+        return datetime.combine(parsed_date, time(23, 59, 59, tzinfo=timezone.utc))
+    return None
+
+
+def parse_legacy_import_voting_member(application: dict[str, Any]) -> bool:
+    # Parse legacy import marker that flags voting-group users.
+    raw_candidates = [
+        application.get("weblium_referer"),
+        application.get("specialization"),
+    ]
+    true_values = {"1", "true", "yes", "y", "on"}
+    for raw in raw_candidates:
+        text = str(raw or "").strip()
+        if not text:
+            continue
+        marker_index = text.find(LEGACY_IMPORT_VOTING_MEMBER_PREFIX)
+        if marker_index < 0:
+            continue
+        marker_chunk = text[
+            marker_index + len(LEGACY_IMPORT_VOTING_MEMBER_PREFIX):
+        ].strip()
+        if not marker_chunk:
+            return False
+        marker_value = marker_chunk.split(";", 1)[0].strip().split()[0].strip().lower()
+        return marker_value in true_values
+    return False
 
 
 async def find_unlinked_candidates_by_phone(
@@ -169,7 +223,7 @@ def build_manual_bind_required_admin_text(
 ) -> str:
     # Build compact admin message for manual bind review cases.
     lines = [
-        "Manual bind confirmation required",
+        "⚠️ Потрібне ручне підтвердження привʼязки",
         f"tg_user_id={tg_user_id}",
         f"username={username or '-'}",
         f"phone={phone_input}",
@@ -179,7 +233,7 @@ def build_manual_bind_required_admin_text(
         lines.append(
             f"other_linked_tg_users={','.join(str(v) for v in other_linked_tg_users)}"
         )
-    lines.append("Candidates:")
+    lines.append("Кандидати:")
 
     for app in sorted(candidates, key=lambda x: x["id"], reverse=True):
         lines.append(
@@ -191,6 +245,7 @@ def build_manual_bind_required_admin_text(
 
 async def notify_admin_manual_bind_required(
     message: Message,
+    repo: PostgresRepo,
     config: Config,
     tg_user_id: int,
     username: str | None,
@@ -200,9 +255,10 @@ async def notify_admin_manual_bind_required(
     other_linked_tg_users: list[int] | None = None,
 ) -> None:
     # Send manual-bind alert to all admins.
+    admin_ids = await get_effective_admin_ids(repo=repo, config=config)
     await notify_admins(
         bot=message.bot,
-        admin_ids=config.tg_bot.admin_ids,
+        admin_ids=admin_ids,
         text=build_manual_bind_required_admin_text(
             tg_user_id=tg_user_id,
             username=username,
@@ -217,6 +273,58 @@ async def notify_admin_manual_bind_required(
             "candidates_count": len(candidates),
             "reason": reason,
         },
+    )
+
+
+def select_binding_candidate(
+    candidates: list[dict[str, Any]],
+) -> tuple[dict[str, Any] | None, str | None]:
+    # Select latest bindable candidate: prefer approved, then pending.
+    if not candidates:
+        return None, "no_candidates"
+
+    approved = [
+        app for app in candidates
+        if str(app.get("status") or "") == "UNLINKED_APPLICATION_APPROVED"
+    ]
+    if approved:
+        # Candidates are fetched ordered by created_at DESC.
+        return approved[0], None
+
+    pending = [
+        app for app in candidates
+        if str(app.get("status") or "") == "UNLINKED_APPLICATION_PENDING"
+    ]
+    if pending:
+        return pending[0], None
+
+    return None, "no_bindable_unlinked_candidates"
+
+
+def build_binding_ambiguity_user_text(
+    *,
+    candidates_count: int,
+    candidate_error: str | None,
+) -> str:
+    # Build clear user-facing explanation when auto-bind is not possible.
+    if candidate_error == "multiple_approved_unlinked_candidates":
+        return (
+            "⚠️ За цим номером знайдено кілька вже схвалених заявок.\n"
+            "Автоприв'язку зупинено, щоб уникнути помилки. Адміністратори отримали запит на ручну перевірку."
+        )
+    if candidate_error == "multiple_pending_unlinked_candidates":
+        return (
+            "⚠️ За цим номером знайдено кілька заявок, що ще на розгляді.\n"
+            "Потрібна ручна перевірка адміністраторами."
+        )
+    if candidate_error == "no_bindable_unlinked_candidates":
+        return (
+            "⚠️ Знайдені заявки поки не можна прив'язати автоматично.\n"
+            "Адміністратори отримали запит на ручну перевірку."
+        )
+    return (
+        f"⚠️ За цим номером знайдено {candidates_count} неприв'язаних заявок.\n"
+        "Адміністратори отримали запит на ручне підтвердження прив'язки."
     )
 
 
@@ -286,7 +394,7 @@ async def binding_entrypoint(query: CallbackQuery, state: FSMContext) -> None:
         menu_message_id=query.message.message_id,
     )
     await query.message.edit_text(
-        "Enter the phone number you used in the website form.",
+        "📱 Введіть номер телефону, який ви вказували у формі на сайті.",
         reply_markup=bind_back_keyboard(),
     )
     remember_tracked_message(
@@ -317,8 +425,8 @@ async def binding_back(
 
     await state.clear()
     edited = await query.message.edit_text(
-        "Please submit your application from this button.\n"
-        "Submissions from this tokenized link are processed automatically.",
+        "📝 Подайте анкету через кнопку нижче.\n"
+        "Заявки з цього персонального посилання обробляються автоматично.",
         reply_markup=application_entry_keyboard(application_url=tokenized_url),
     )
     remember_tracked_message(
@@ -346,7 +454,7 @@ async def binding_receive_phone(
     # Validate phone, auto-bind safely when possible, otherwise notify admins.
     from_user = message.from_user
     if from_user is None:
-        await message.answer("Unable to identify Telegram user.")
+        await message.answer("⚠️ Не вдалося визначити користувача Telegram.")
         return
 
     phone_input = (message.text or "").strip()
@@ -355,14 +463,14 @@ async def binding_receive_phone(
         await edit_menu_message(
             message=message,
             state=state,
-            text="Phone number looks invalid. Enter a valid phone number.",
+            text="⚠️ Схоже, номер телефону некоректний. Введіть правильний номер.",
             reply_markup=bind_back_keyboard(),
         )
         return
 
     await repo.create_or_update_user(
         tg_user_id=from_user.id,
-        full_name=from_user.full_name or "Unknown",
+        full_name=from_user.full_name or "Невідомо",
         username=from_user.username,
         language_code=from_user.language_code,
     )
@@ -373,8 +481,8 @@ async def binding_receive_phone(
             message=message,
             state=state,
             text=(
-                "Your Telegram account already has an active membership flow.\n"
-                "Please contact admin if you need to merge records."
+                "⚠️ Для вашого Telegram-акаунта вже є активний процес членства.\n"
+                "Зверніться до адміністратора, якщо потрібно обʼєднати записи."
             ),
         )
         return
@@ -386,8 +494,8 @@ async def binding_receive_phone(
             message=message,
             state=state,
             text=(
-                "We could not find an unlinked application by this phone.\n"
-                "Check the number and try again, or contact admin."
+                "🔎 Не вдалося знайти непривʼязану заявку за цим номером.\n"
+                "Перевірте номер і спробуйте ще раз або зверніться до адміністратора."
             ),
         )
         return
@@ -401,6 +509,7 @@ async def binding_receive_phone(
         await state.clear()
         await notify_admin_manual_bind_required(
             message=message,
+            repo=repo,
             config=config,
             tg_user_id=from_user.id,
             username=from_user.username,
@@ -413,45 +522,77 @@ async def binding_receive_phone(
             message=message,
             state=state,
             text=(
-                "This phone is already linked to another Telegram account.\n"
-                "Admins were notified for manual verification."
+                "⚠️ Цей номер уже привʼязаний до іншого Telegram-акаунта.\n"
+                "Адміністратори отримали запит на ручну перевірку."
             ),
         )
         return
 
-    if len(candidates) > 1:
+    candidate, candidate_error = select_binding_candidate(candidates)
+    if candidate is None:
         await state.clear()
         await notify_admin_manual_bind_required(
             message=message,
+            repo=repo,
             config=config,
             tg_user_id=from_user.id,
             username=from_user.username,
             phone_input=phone_input,
-            reason="multiple_unlinked_candidates",
+            reason=candidate_error or "multiple_unlinked_candidates",
+            candidates=candidates,
+        )
+        await edit_menu_message(
+            message=message,
+            state=state,
+            text=build_binding_ambiguity_user_text(
+                candidates_count=len(candidates),
+                candidate_error=candidate_error,
+            ),
+        )
+        return
+    if False and candidate is None:
+        await state.clear()
+        await notify_admin_manual_bind_required(
+            message=message,
+            repo=repo,
+            config=config,
+            tg_user_id=from_user.id,
+            username=from_user.username,
+            phone_input=phone_input,
+            reason=candidate_error or "multiple_unlinked_candidates",
             candidates=candidates,
         )
         await edit_menu_message(
             message=message,
             state=state,
             text=(
-                "We found multiple possible applications.\n"
-                "Admins were notified to confirm binding manually."
+                "⚠️ Знайдено кілька можливих заявок.\n"
+                "Адміністратори отримали запит для ручного підтвердження привʼязки."
             ),
         )
         return
 
-    candidate = candidates[0]
     candidate_status = candidate["status"]
+    legacy_subscription_expires_at = parse_legacy_import_expiry(candidate)
+    is_legacy_voting_member = parse_legacy_import_voting_member(candidate)
     if candidate_status == "UNLINKED_APPLICATION_PENDING":
         target_status = "APPLICATION_PENDING"
     elif candidate_status == "UNLINKED_APPLICATION_APPROVED":
-        target_status = "APPROVED_AWAITING_PAYMENT"
+        if is_legacy_voting_member:
+            target_status = "ACTIVE_MEMBER"
+        elif (
+            legacy_subscription_expires_at is not None
+            and legacy_subscription_expires_at > datetime.now(timezone.utc)
+        ):
+            target_status = "ACTIVE_MEMBER"
+        else:
+            target_status = "APPROVED_AWAITING_PAYMENT"
     else:
         await state.clear()
         await edit_menu_message(
             message=message,
             state=state,
-            text="This application cannot be bound automatically. Please contact admin.",
+            text="⚠️ Цю заявку не можна привʼязати автоматично. Зверніться до адміністратора.",
         )
         return
 
@@ -467,21 +608,63 @@ async def binding_receive_phone(
             message=message,
             state=state,
             text=(
-                "Binding failed because the application was already updated.\n"
-                "Please contact admin for manual confirmation."
+                "⚠️ Привʼязку не виконано: заявку вже було оновлено.\n"
+                "Зверніться до адміністратора для ручного підтвердження."
             ),
         )
         return
 
     await state.clear()
 
-    if target_status == "APPROVED_AWAITING_PAYMENT":
+    if target_status == "ACTIVE_MEMBER":
+        if legacy_subscription_expires_at is not None:
+            await repo.set_user_subscription_until(
+                tg_user_id=from_user.id,
+                subscription_expires_at=legacy_subscription_expires_at,
+                full_name=from_user.full_name or "Невідомо",
+                username=from_user.username,
+                language_code=from_user.language_code,
+            )
+        expiry_text = (
+            legacy_subscription_expires_at.astimezone(timezone.utc).strftime("%d.%m.%Y")
+            if legacy_subscription_expires_at is not None
+            else "-"
+        )
+        if is_legacy_voting_member:
+            await repo.upsert_voting_member(
+                tg_user_id=from_user.id,
+                username=from_user.username,
+                full_name=from_user.full_name,
+                language_code=from_user.language_code,
+                member_status="ACTIVE",
+                verified_at=datetime.now(timezone.utc),
+            )
+            await edit_menu_message(
+                message=message,
+                state=state,
+                text=(
+                    "✅ Ви в групі голосування, тому заявка й оплата не потрібні.\n"
+                    "Натисніть кнопку нижче, щоб отримати доступ до групи."
+                ),
+                reply_markup=group_access_keyboard(),
+            )
+        else:
+            await edit_menu_message(
+                message=message,
+                state=state,
+                text=(
+                    "✅ Ваші дані з реєстру успішно привʼязано до Telegram.\n"
+                    f"Поточне членство активне до {expiry_text}. Оплата зараз не потрібна."
+                ),
+                reply_markup=group_access_keyboard(),
+            )
+    elif target_status == "APPROVED_AWAITING_PAYMENT":
         await edit_menu_message(
             message=message,
             state=state,
             text=(
-                "Your previous site application was linked successfully and is approved.\n"
-                "You can proceed to payment now."
+                "✅ Вашу заявку із сайту успішно привʼязано та підтверджено.\n"
+                "Можна переходити до оплати."
             ),
             reply_markup=payment_keyboard(),
         )
@@ -490,16 +673,17 @@ async def binding_receive_phone(
             message=message,
             state=state,
             text=(
-                "Your previous site application was linked successfully.\n"
-                "Current status: under review."
+                "✅ Вашу заявку із сайту успішно привʼязано.\n"
+                "Поточний статус: на розгляді."
             ),
         )
 
+    admin_ids = await get_effective_admin_ids(repo=repo, config=config)
     await notify_admins(
         bot=message.bot,
-        admin_ids=config.tg_bot.admin_ids,
+        admin_ids=admin_ids,
         text=(
-            "Application bound to Telegram user\n"
+            "✅ Заявку привʼязано до Telegram-користувача\n"
             f"application_id={bound.get('id')}\n"
             f"tg_user_id={from_user.id}\n"
             f"status={bound.get('status')}"
