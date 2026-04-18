@@ -2,6 +2,7 @@
 
 import base64
 import hashlib
+import hmac
 import json
 import logging
 import secrets
@@ -128,6 +129,55 @@ def _is_ip_allowed(client_ip: str | None, trusted_proxy_ips: list[str]) -> bool:
         if client in ip_network(raw_network, strict=False):
             return True
     return False
+
+
+def _is_webhook_signature_valid(
+    *,
+    request: web.Request | Any,
+    raw_body: bytes,
+    signature_secret: str | None,
+    signature_header: str = "X-Webhook-Signature",
+) -> bool:
+    # Validate webhook signature in hex/base64 formats with optional sha256= prefix.
+    secret = _as_string(signature_secret)
+    if not secret:
+        return True
+
+    headers = getattr(request, "headers", {}) or {}
+    header_value = _as_string(headers.get(signature_header))
+    if not header_value:
+        return False
+
+    candidate = header_value
+    if candidate.lower().startswith("sha256="):
+        candidate = candidate.split("=", 1)[1].strip()
+
+    digest = hmac.new(secret.encode("utf-8"), raw_body, hashlib.sha256).digest()
+    expected_hex = digest.hex()
+    expected_b64 = base64.b64encode(digest).decode("utf-8")
+
+    return secrets.compare_digest(candidate, expected_hex) or secrets.compare_digest(
+        candidate, expected_b64
+    )
+
+
+@web.middleware
+async def unhandled_error_middleware(request: web.Request, handler: Any) -> web.StreamResponse:
+    # Return JSON 500 for webhook paths and plain text 500 for all other paths.
+    try:
+        return await handler(request)
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "Unhandled HTTP handler error. method=%s path=%s",
+            request.method,
+            request.path,
+        )
+        if request.path.startswith("/webhooks/"):
+            return web.json_response(
+                {"ok": False, "error": "internal server error"},
+                status=500,
+            )
+        return web.Response(status=500, text="internal server error")
 
 
 def _extract_tg_token_from_referer(referer: str | None) -> str | None:
@@ -856,7 +906,7 @@ async def _on_cleanup(app: web.Application) -> None:
 
 def create_app(config: Config | None = None) -> web.Application:
     resolved_config = config or load_config(".env")
-    app = web.Application()
+    app = web.Application(middlewares=[unhandled_error_middleware])
     app["config"] = resolved_config
 
     app.router.add_post(PRIMARY_WEBLIUM_PATH, weblium_application_webhook)
