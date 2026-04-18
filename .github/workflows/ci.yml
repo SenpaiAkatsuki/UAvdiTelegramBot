@@ -18,6 +18,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       RUN_WEBLIUM_SMOKE_TESTS: ${{ github.event.inputs.run_smoke_tests == 'true' && '1' || '0' }}
+      PYTHONPATH: ${{ github.workspace }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -33,9 +34,11 @@ jobs:
           pip install -r requirements.txt -r requirements-dev.txt
 
       - name: Compile source
+        working-directory: ${{ github.workspace }}
         run: |
           python -m compileall bot.py tgbot infrastructure
 
       - name: Run tests
+        working-directory: ${{ github.workspace }}
         run: |
           python -m pytest
