@@ -1,6 +1,6 @@
-# UAvdiTelegramBot
+# CommunityFlowBot
 
-**UAvdiTelegramBot** is a Telegram membership automation system for UAVDI.
+**CommunityFlowBot** is a Telegram membership automation system for UAVDI.
 It manages the full flow: application intake, voting, payment, subscription lifecycle, and private group access.
 
 ---
